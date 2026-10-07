@@ -280,14 +280,6 @@ func record(source string) error {
 
 	textPath := strings.TrimSuffix(output, ".ogg") + ".txt"
 
-	// Start Whisper once for this recording. The server is kept alive until
-	// the recording has been converted and transcribed.
-	client, err := startWhisper()
-	if err != nil {
-		return err
-	}
-	defer client.close()
-
 	cmd := exec.Command(
 		"ffmpeg",
 		"-y",
@@ -391,47 +383,16 @@ func record(source string) error {
 		return errors.New("recording stopped, but the audio file is empty")
 	}
 
-	// Convert the finalized OGG to the exact PCM format expected by
-	// whisper_process_windows.go: 16 kHz, mono, signed 16-bit PCM.
-	convert := exec.Command(
-		"ffmpeg",
-		"-hide_banner",
-		"-loglevel",
-		"error",
-		"-i",
-		output,
-		"-ar",
-		"16000",
-		"-ac",
-		"1",
-		"-f",
-		"s16le",
-		"pipe:1",
-	)
-
-	var convertErr bytes.Buffer
-	convert.Stderr = &convertErr
-	pcm, err := convert.Output()
+	// Keep the raw OGG and send it directly to OpenAI transcription.
+	// This removes local Whisper startup and the OGG -> PCM conversion.
+	transcript, err := transcribeAudioFile(output)
 	if err != nil {
-		msg := strings.TrimSpace(convertErr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return fmt.Errorf("could not convert recording for Whisper: %s", msg)
-	}
-
-	if len(pcm) == 0 {
-		return errors.New("recording contains no audio samples")
-	}
-
-	transcript, err := client.infer(pcm)
-	if err != nil {
-		return fmt.Errorf("Whisper transcription failed: %w", err)
+		return fmt.Errorf("OpenAI transcription failed: %w", err)
 	}
 
 	transcript = strings.TrimSpace(transcript)
 	if transcript == "" {
-		return errors.New("Whisper returned an empty transcript. Make sure the meeting audio is audible through Stereo Mix")
+		return errors.New("OpenAI returned an empty transcript")
 	}
 
 	if err := os.WriteFile(

@@ -149,10 +149,11 @@ func answerQuestion(question, context, transcriptPath string) (openAIResult, err
 
 	summaryPath := ""
 	if strings.TrimSpace(transcriptPath) != "" {
-		if err := allowedTranscript(transcriptPath); err != nil {
+		resolvedPath, err := resolveTranscriptPath(transcriptPath)
+		if err != nil {
 			return openAIResult{}, err
 		}
-		summaryPath = strings.TrimSuffix(transcriptPath, ".txt") + ".summary.txt"
+		summaryPath = strings.TrimSuffix(resolvedPath, ".txt") + ".summary.txt"
 		entry := "Q: " + question + "\nA: " + answer + "\n\n"
 		file, err := os.OpenFile(summaryPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
@@ -171,10 +172,11 @@ func answerQuestion(question, context, transcriptPath string) (openAIResult, err
 }
 
 func summarizeTranscript(path string, emit func(string)) (openAIResult, error) {
-	if err := allowedTranscript(path); err != nil {
+	resolvedPath, err := resolveTranscriptPath(path)
+	if err != nil {
 		return openAIResult{}, err
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(resolvedPath)
 	if err != nil {
 		return openAIResult{}, err
 	}
@@ -182,7 +184,9 @@ func summarizeTranscript(path string, emit func(string)) (openAIResult, error) {
 	if transcript == "" {
 		return openAIResult{}, errors.New("the transcript is empty")
 	}
-	transcript = clipRunes(transcript, 24000)
+	// The user normally wants the latest question. Sending only the tail
+	// reduces latency and input-token cost for long meetings.
+	transcript = clipTailRunes(transcript, 14000)
 
 	key, err := readOpenAIKey()
 	if err != nil {
@@ -193,7 +197,7 @@ func summarizeTranscript(path string, emit func(string)) (openAIResult, error) {
 		return openAIResult{}, err
 	}
 
-	summaryPath := strings.TrimSuffix(path, ".txt") + ".summary.txt"
+	summaryPath := strings.TrimSuffix(resolvedPath, ".txt") + ".summary.txt"
 	if err := os.WriteFile(summaryPath, []byte(answer+"\n"), 0o644); err != nil {
 		return openAIResult{}, err
 	}
@@ -211,23 +215,92 @@ func clipRunes(text string, max int) string {
 	return text[:cut]
 }
 
-func allowedTranscript(path string) error {
-	// Normalize Windows paths to forward slashes before checking the
-	// Downloads directory. The Linux implementation used "/Downloads/",
-	// but Windows paths normally contain "\\Downloads\\".
-	cleanPath := filepath.Clean(strings.TrimSpace(path))
-	normalizedPath := filepath.ToSlash(cleanPath)
-	name := filepath.Base(cleanPath)
+func clipTailRunes(text string, max int) string {
+	if len(text) <= max {
+		return text
+	}
+	start := len(text) - max
+	for start < len(text) && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	return text[start:]
+}
 
-	if !filepath.IsAbs(cleanPath) ||
-		!strings.Contains(normalizedPath, "/Downloads/") ||
-		!strings.HasPrefix(name, "meet-") ||
-		!strings.HasSuffix(name, ".txt") ||
-		strings.HasSuffix(name, ".summary.txt") {
-		return errors.New("choose a saved meeting transcript")
+func resolveTranscriptPath(path string) (string, error) {
+	path = strings.TrimSpace(strings.Trim(path, `"`))
+
+	// Tauri normally sends a native Windows path. Also accept a file:// URL
+	// because WebView code can sometimes return one when a file is selected.
+	if strings.HasPrefix(strings.ToLower(path), "file:///") {
+		path = path[8:]
+		if len(path) >= 3 && path[0] == '/' && path[2] == ':' {
+			path = path[1:]
+		}
 	}
 
-	return nil
+	path = filepath.FromSlash(path)
+	if path != "" {
+		cleanPath := filepath.Clean(path)
+		if transcriptPathIsAllowed(cleanPath) {
+			if _, err := os.Stat(cleanPath); err == nil {
+				return cleanPath, nil
+			}
+		}
+	}
+
+	// If the frontend did not provide a usable path, automatically choose
+	// the newest saved meeting transcript. This is the same behavior the
+	// application has after stopping a recording: use the transcript that
+	// was just created instead of asking the user to select one.
+	dir, err := downloadsDir()
+	if err != nil {
+		return "", errors.New("choose a saved meeting transcript")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", errors.New("choose a saved meeting transcript")
+	}
+
+	var newestPath string
+	var newestTime time.Time
+	for _, entry := range entries {
+		if entry.IsDir() || !isMeetingTranscriptName(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if newestPath == "" || info.ModTime().After(newestTime) {
+			newestPath = filepath.Join(dir, entry.Name())
+			newestTime = info.ModTime()
+		}
+	}
+
+	if newestPath == "" {
+		return "", errors.New("choose a saved meeting transcript")
+	}
+	return newestPath, nil
+}
+
+func isMeetingTranscriptName(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasPrefix(lower, "meet-") &&
+		strings.HasSuffix(lower, ".txt") &&
+		!strings.HasSuffix(lower, ".summary.txt")
+}
+
+func transcriptPathIsAllowed(path string) bool {
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	return isMeetingTranscriptName(filepath.Base(path))
+}
+
+func allowedTranscript(path string) error {
+	_, err := resolveTranscriptPath(path)
+	return err
 }
 
 func askOpenAIOne(key, question, context string) (string, error) {
@@ -241,16 +314,17 @@ func askOpenAIOne(key, question, context string) (string, error) {
 func askOpenAI(key, transcript string, emit func(string)) (string, error) {
 	return completeOpenAI(
 		key,
-		"The transcript is automatic speech recognition from a lesson or interview. Question marks are often missing and sentences may be incomplete. Identify the question the speaker is asking or introducing, and rewrite it as one clear question on a line starting with Q:. Then answer that question on the following lines starting with A:, using your own knowledge. Do not reply that there was no question.",
-		"Transcript:\n\n"+transcript,
+		meetingAnswerSystemPrompt,
+		"Latest meeting transcript:\n\n"+transcript,
 		emit,
 	)
 }
 
 func completeOpenAI(key, system, user string, emit func(string)) (string, error) {
 	request := map[string]any{
-		"model":      openAIModel,
-		"max_tokens": 320,
+		"model":       openAIModel,
+		"max_tokens":  280,
+		"temperature": 0.1,
 		"messages": []map[string]string{
 			{"role": "system", "content": system},
 			{"role": "user", "content": user},
