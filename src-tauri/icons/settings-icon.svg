@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Outer gear shape -->
+  <defs>
+    <style>
+      .settings-main { fill: #3b82f6; }
+      .settings-center { fill: #ffffff; }
+      .settings-dot { fill: #3b82f6; }
+    </style>
+  </defs>
+  
+  <!-- Main Gear Circle -->
+  <g class="settings-main">
+    <!-- Center circle -->
+    <circle cx="128" cy="128" r="110" />
+    
+    <!-- Top tooth -->
+    <rect x="118" y="8" width="20" height="30" rx="2"/>
+    <!-- Top-right tooth -->
+    <rect x="175" y="35" width="21.2" height="21.2" rx="2" transform="rotate(45 185.6 45.6)"/>
+    <!-- Right tooth -->
+    <rect x="218" y="118" width="30" height="20" rx="2"/>
+    <!-- Bottom-right tooth -->
+    <rect x="175" y="200" width="21.2" height="21.2" rx="2" transform="rotate(-45 185.6 210.6)"/>
+    <!-- Bottom tooth -->
+    <rect x="118" y="218" width="20" height="30" rx="2"/>
+    <!-- Bottom-left tooth -->
+    <rect x="48" y="200" width="21.2" height="21.2" rx="2" transform="rotate(45 58.6 210.6)"/>
+    <!-- Left tooth -->
+    <rect x="8" y="118" width="30" height="20" rx="2"/>
+    <!-- Top-left tooth -->
+    <rect x="48" y="35" width="21.2" height="21.2" rx="2" transform="rotate(-45 58.6 45.6)"/>
+  </g>
+  
+  <!-- Inner white circle -->
+  <circle cx="128" cy="128" r="60" class="settings-center"/>
+  
+  <!-- Center dot -->
+  <circle cx="128" cy="128" r="12" class="settings-dot"/>
+  
+  <!-- Inner gear pattern (decorative) -->
+  <g stroke="#3b82f6" stroke-width="3" fill="none" opacity="0.3">
+    <circle cx="128" cy="128" r="35"/>
+    <line x1="128" y1="93" x2="128" y2="163"/>
+    <line x1="93" y1="128" x2="163" y2="128"/>
+  </g>
+</svg>
