@@ -5,10 +5,16 @@
   "type": "module",
   "scripts": {
     "engine": "go -C engine build -o meetrec .",
+    "engine:windows": "go -C engine build -o meetrec.exe .",
+
     "dev": "vite",
-    "dev:all": "go -C engine build -o meetrec . && vite",
+    "dev:all": "npm run engine && vite",
+    "dev:windows": "npm run engine:windows && vite",
+
     "build": "tsc && vite build",
-    "build:all": "go -C engine build -o meetrec . && tsc && vite build",
+    "build:all": "npm run engine && tsc && vite build",
+    "build:windows": "npm run engine:windows && tsc && vite build",
+
     "preview": "vite preview",
     "tauri": "tauri"
   },

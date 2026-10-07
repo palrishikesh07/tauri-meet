@@ -1,7 +1,8 @@
 mod capture;
 
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -89,89 +90,190 @@ struct SavedTake {
     transcript: String,
 }
 
-fn engine_binary(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn engine_binary(
+    app: &tauri::AppHandle,
+) -> Result<PathBuf, String> {
+    let engine_name = if cfg!(windows) {
+        "meetrec.exe"
+    } else {
+        "meetrec"
+    };
+
     if let Ok(path) = app
         .path()
-        .resolve("meetrec", tauri::path::BaseDirectory::Resource)
+        .resolve(
+            engine_name,
+            tauri::path::BaseDirectory::Resource,
+        )
     {
         if path.is_file() {
             return Ok(path);
         }
     }
 
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine/meetrec");
+    let dev = PathBuf::from(
+        env!("CARGO_MANIFEST_DIR"),
+    )
+    .join("../engine")
+    .join(engine_name);
+
     if dev.is_file() {
         return Ok(dev);
     }
 
-    Err("Recording engine is missing. From the project folder run: go -C engine build -o meetrec .".into())
+    Err(format!(
+        "Recording engine is missing. Expected engine/{engine_name}. Build it first."
+    ))
 }
 
-fn run_engine(app: &tauri::AppHandle, args: &[String]) -> Result<String, String> {
+fn run_engine(
+    app: &tauri::AppHandle,
+    args: &[String],
+) -> Result<String, String> {
     let bin = engine_binary(app)?;
+
     let output = Command::new(bin)
         .args(args)
         .output()
-        .map_err(|err| format!("could not start the recorder: {err}"))?;
+        .map_err(|err| {
+            format!(
+                "could not start the recorder: {err}"
+            )
+        })?;
 
     if !output.status.success() {
-        let err_text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let err_text =
+            String::from_utf8_lossy(
+                &output.stderr,
+            )
+            .trim()
+            .to_string();
+
         if err_text.is_empty() {
-            return Err("recorder command failed".into());
+            return Err(
+                "recorder command failed".into()
+            );
         }
+
         return Err(err_text);
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(
+        String::from_utf8_lossy(
+            &output.stdout,
+        )
+        .to_string(),
+    )
 }
 
 async fn spawn_off_ui<T: Send + 'static>(
-    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+    work: impl FnOnce() -> Result<T, String>
+        + Send
+        + 'static,
 ) -> Result<T, String> {
-    match tauri::async_runtime::spawn_blocking(work).await {
+    match tauri::async_runtime::spawn_blocking(
+        work,
+    )
+    .await
+    {
         Ok(result) => result,
-        Err(err) => Err(format!("background task stopped: {err}")),
+        Err(err) => Err(format!(
+            "background task stopped: {err}"
+        )),
     }
 }
 
-fn interrupt(child: &Child) {
+#[cfg(unix)]
+fn interrupt(child: &mut Child) {
     let pid = child.id();
-    if pid == 0 || pid > i32::MAX as u32 {
+
+    if pid == 0 ||
+        pid > i32::MAX as u32
+    {
         return;
     }
+
     unsafe {
-        libc::kill(pid as i32, libc::SIGINT);
+        libc::kill(
+            pid as i32,
+            libc::SIGINT,
+        );
     }
 }
 
-fn stop_job(job: Job, wait: Duration) -> Result<SavedTake, String> {
+#[cfg(windows)]
+fn interrupt(child: &mut Child) {
+    // The Windows Go recorder listens on stdin for "stop". It then tells
+    // FFmpeg to quit cleanly, finalizes the OGG file, and runs Whisper.
+    if let Some(stdin) = child.stdin.as_mut() {
+        let _ = stdin.write_all(b"stop\n");
+        let _ = stdin.flush();
+    } else {
+        // Fallback for an unexpected recorder process without piped stdin.
+        let _ = child.kill();
+    }
+}
+
+fn stop_job(
+    job: Job,
+    wait: Duration,
+) -> Result<SavedTake, String> {
     let Job {
         mut child,
         path,
         text_path,
         ..
     } = job;
-    interrupt(&child);
+
+    interrupt(&mut child);
 
     let started = Instant::now();
-    loop {
+
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() > wait => {
+            Ok(Some(status)) => break status,
+
+            Ok(None)
+                if started.elapsed() > wait =>
+            {
                 let _ = child.kill();
                 let _ = child.wait();
-                break;
+                return Err(
+                    "recording stop timed out while creating the transcript (Whisper may still be processing)"
+                        .into(),
+                );
             }
-            Ok(None) => thread::sleep(Duration::from_millis(40)),
-            Err(err) => return Err(format!("could not stop the recording: {err}")),
+
+            Ok(None) => {
+                thread::sleep(
+                    Duration::from_millis(40),
+                );
+            }
+
+            Err(err) => {
+                return Err(format!(
+                    "could not stop the recording: {err}"
+                ));
+            }
         }
+    };
+
+    if !status.success() {
+        return Err(format!(
+            "recorder failed while creating the transcript (exit status: {status})"
+        ));
     }
 
-    let meta = fs::metadata(&path).map_err(|_| {
-        format!("recording stopped, but the file was not written: {path}")
-    })?;
+    let meta = fs::metadata(&path)
+        .map_err(|_| {
+            format!(
+                "recording stopped, but the file was not written: {path}"
+            )
+        })?;
 
-    let transcript = fs::read_to_string(&text_path).unwrap_or_default();
+    let transcript =
+        fs::read_to_string(&text_path)
+            .unwrap_or_default();
 
     Ok(SavedTake {
         path,
@@ -182,37 +284,80 @@ fn stop_job(job: Job, wait: Duration) -> Result<SavedTake, String> {
 }
 
 #[tauri::command]
-fn list_devices(app: tauri::AppHandle) -> Result<DeviceList, String> {
-    let raw = run_engine(&app, &["devices".into()])?;
-    serde_json::from_str(&raw).map_err(|err| format!("could not read devices: {err}"))
+fn list_devices(
+    app: tauri::AppHandle,
+) -> Result<DeviceList, String> {
+    let raw = run_engine(
+        &app,
+        &["devices".into()],
+    )?;
+
+    serde_json::from_str(&raw)
+        .map_err(|err| {
+            format!(
+                "could not read devices: {err}"
+            )
+        })
 }
 
 #[tauri::command]
-fn list_recordings(app: tauri::AppHandle) -> Result<Vec<RecordingFile>, String> {
-    let raw = run_engine(&app, &["list".into()])?;
-    serde_json::from_str(&raw).map_err(|err| format!("could not read recordings: {err}"))
+fn list_recordings(
+    app: tauri::AppHandle,
+) -> Result<Vec<RecordingFile>, String> {
+    let raw = run_engine(
+        &app,
+        &["list".into()],
+    )?;
+
+    serde_json::from_str(&raw)
+        .map_err(|err| {
+            format!(
+                "could not read recordings: {err}"
+            )
+        })
 }
 
 #[tauri::command]
-fn recording_status(state: tauri::State<'_, AppState>) -> RecordingStatus {
-    let mut guard = state.job.lock().expect("recording state");
+fn recording_status(
+    state: tauri::State<'_, AppState>,
+) -> RecordingStatus {
+    let mut guard =
+        state.job.lock().expect(
+            "recording state",
+        );
+
     if let Some(job) = guard.as_mut() {
         match job.child.try_wait() {
             Ok(Some(_)) => {
                 *guard = None;
             }
+
             Ok(None) => {
-                let live = job.live.lock().expect("transcript");
+                let live =
+                    job.live.lock().expect(
+                        "transcript",
+                    );
+
                 return RecordingStatus {
                     recording: true,
-                    path: Some(job.path.clone()),
-                    text_path: Some(job.text_path.clone()),
-                    source: Some(job.source.clone()),
-                    elapsed_secs: job.started.elapsed().as_secs(),
+                    path: Some(
+                        job.path.clone(),
+                    ),
+                    text_path: Some(
+                        job.text_path.clone(),
+                    ),
+                    source: Some(
+                        job.source.clone(),
+                    ),
+                    elapsed_secs: job
+                        .started
+                        .elapsed()
+                        .as_secs(),
                     transcript: live.text.clone(),
                     partial: live.partial.clone(),
                 };
             }
+
             Err(_) => {
                 *guard = None;
             }
@@ -231,138 +376,285 @@ fn recording_status(state: tauri::State<'_, AppState>) -> RecordingStatus {
 }
 
 #[tauri::command]
-async fn start_recording(app: tauri::AppHandle, source: Option<String>) -> Result<ReadyMessage, String> {
-    spawn_off_ui(move || start_recording_blocking(app, source)).await
+async fn start_recording(
+    app: tauri::AppHandle,
+    source: Option<String>,
+) -> Result<ReadyMessage, String> {
+    spawn_off_ui(
+        move || {
+            start_recording_blocking(
+                app,
+                source,
+            )
+        },
+    )
+    .await
 }
 
 fn start_recording_blocking(
     app: tauri::AppHandle,
     source: Option<String>,
 ) -> Result<ReadyMessage, String> {
-    let state = app.state::<AppState>();
+    let state =
+        app.state::<AppState>();
+
     {
-        let guard = state.job.lock().expect("recording state");
+        let guard =
+            state.job.lock().expect(
+                "recording state",
+            );
+
         if guard.is_some() {
-            return Err("a recording is already running".into());
+            return Err(
+                "a recording is already running"
+                    .into(),
+            );
         }
     }
 
     let bin = engine_binary(&app)?;
-    let mut args = vec!["record".to_string()];
-    if let Some(source) = source.filter(|value| !value.is_empty()) {
-        args.push("--source".into());
+
+    let mut args =
+        vec!["record".to_string()];
+
+    if let Some(source) =
+        source.filter(|value| !value.is_empty())
+    {
+        args.push(
+            "--source".into(),
+        );
+
         args.push(source);
     }
 
-    let mut command = Command::new(bin);
-    // Own process group so stopping ffmpeg cannot signal this app.
+    let mut command =
+        Command::new(bin);
+
     command
-        .process_group(0)
         .args(&args)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // When the window process dies, the recorder receives SIGINT and finishes the file.
+
+    #[cfg(unix)]
     unsafe {
         command.pre_exec(|| {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGINT);
+            libc::prctl(
+                libc::PR_SET_PDEATHSIG,
+                libc::SIGINT,
+            );
+
             Ok(())
         });
     }
+
     let mut child = command
         .spawn()
-        .map_err(|err| format!("could not start the recorder: {err}"))?;
+        .map_err(|err| {
+            format!(
+                "could not start the recorder: {err}"
+            )
+        })?;
 
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "recorder stdout was not available".to_string())?;
+        .ok_or_else(|| {
+            "recorder stdout was not available"
+                .to_string()
+        })?;
+
     let mut stderr = child
         .stderr
         .take()
-        .ok_or_else(|| "recorder stderr was not available".to_string())?;
+        .ok_or_else(|| {
+            "recorder stderr was not available"
+                .to_string()
+        })?;
 
-    let errors = Arc::new(Mutex::new(String::new()));
-    let errors_for_thread = Arc::clone(&errors);
+    let errors =
+        Arc::new(Mutex::new(String::new()));
+
+    let errors_for_thread =
+        Arc::clone(&errors);
+
     thread::spawn(move || {
         let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
-        *errors_for_thread.lock().expect("stderr") = text;
+
+        let _ =
+            stderr.read_to_string(&mut text);
+
+        *errors_for_thread
+            .lock()
+            .expect("stderr") = text;
     });
 
-    let live = Arc::new(Mutex::new(LiveText {
-        text: String::new(),
-        partial: String::new(),
-    }));
-    let live_for_thread = Arc::clone(&live);
-    let app_for_audio = app.clone();
-    let (tx, rx) = mpsc::channel();
+    let live =
+        Arc::new(Mutex::new(
+            LiveText {
+                text: String::new(),
+                partial: String::new(),
+            },
+        ));
+
+    let live_for_thread =
+        Arc::clone(&live);
+
+    let app_for_audio =
+        app.clone();
+
+    let (tx, rx) =
+        mpsc::channel();
+
     thread::spawn(move || {
         let mut saw_ready = false;
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { continue };
+
+        for line in
+            BufReader::new(stdout).lines()
+        {
+            let Ok(line) = line else {
+                continue;
+            };
+
             if line.trim().is_empty() {
                 continue;
             }
+
             if !saw_ready {
                 saw_ready = true;
-                let _ = tx.send(line);
+
+                let _ =
+                    tx.send(line);
+
                 continue;
             }
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+
+            let Ok(value) =
+                serde_json::from_str::<
+                    serde_json::Value,
+                >(&line)
+            else {
                 continue;
             };
-            match value.get("status").and_then(|status| status.as_str()) {
+
+            match value
+                .get("status")
+                .and_then(|status| status.as_str())
+            {
                 Some("pcm") => {
-                    if let Some(pcm) = value.get("pcm").and_then(|pcm| pcm.as_str()) {
-                        let _ = app_for_audio.emit("pcm", pcm);
+                    if let Some(pcm) =
+                        value
+                            .get("pcm")
+                            .and_then(|pcm| pcm.as_str())
+                    {
+                        let _ =
+                            app_for_audio.emit(
+                                "pcm",
+                                pcm,
+                            );
                     }
                 }
+
                 Some("text") => {
                     let text = value
                         .get("text")
-                        .and_then(|text| text.as_str())
+                        .and_then(|text| {
+                            text.as_str()
+                        })
                         .unwrap_or("")
                         .to_string();
+
                     let partial = value
                         .get("partial")
-                        .and_then(|partial| partial.as_str())
+                        .and_then(|partial| {
+                            partial.as_str()
+                        })
                         .unwrap_or("")
                         .to_string();
-                    *live_for_thread.lock().expect("transcript") = LiveText { text, partial };
+
+                    *live_for_thread
+                        .lock()
+                        .expect("transcript") =
+                        LiveText {
+                            text,
+                            partial,
+                        };
                 }
+
                 _ => {}
             }
         }
     });
 
-    let line = match rx.recv_timeout(Duration::from_secs(90)) {
-        Ok(line) => line,
-        Err(_) => {
-            interrupt(&child);
-            let _ = child.wait();
-            thread::sleep(Duration::from_millis(150));
-            let detail = errors.lock().expect("stderr").trim().to_string();
-            if detail.is_empty() {
-                return Err("recording did not start".into());
+    let line =
+        match rx.recv_timeout(
+            Duration::from_secs(90),
+        ) {
+            Ok(line) => line,
+
+            Err(_) => {
+                interrupt(&mut child);
+
+                let _ =
+                    child.wait();
+
+                thread::sleep(
+                    Duration::from_millis(150),
+                );
+
+                let detail =
+                    errors
+                        .lock()
+                        .expect("stderr")
+                        .trim()
+                        .to_string();
+
+                if detail.is_empty() {
+                    return Err(
+                        "recording did not start"
+                            .into(),
+                    );
+                }
+
+                return Err(detail);
             }
-            return Err(detail);
-        }
-    };
+        };
 
-    let ready: ReadyMessage = serde_json::from_str(&line)
-        .map_err(|err| format!("unexpected recorder message: {err}"))?;
-    if ready.status != "recording" || ready.path.is_empty() {
-        interrupt(&child);
+    let ready: ReadyMessage =
+        serde_json::from_str(&line)
+            .map_err(|err| {
+                format!(
+                    "unexpected recorder message: {err}"
+                )
+            })?;
+
+    if ready.status != "recording" ||
+        ready.path.is_empty()
+    {
+        interrupt(&mut child);
         let _ = child.wait();
-        return Err("recorder did not confirm the file".into());
+
+        return Err(
+            "recorder did not confirm the file"
+                .into(),
+        );
     }
 
-    let mut guard = state.job.lock().expect("recording state");
+    let mut guard =
+        state.job.lock().expect(
+            "recording state",
+        );
+
     if guard.is_some() {
-        interrupt(&child);
+        interrupt(&mut child);
         let _ = child.wait();
-        return Err("a recording is already running".into());
+
+        return Err(
+            "a recording is already running"
+                .into(),
+        );
     }
+
     *guard = Some(Job {
         child,
         path: ready.path.clone(),
@@ -376,20 +668,42 @@ fn start_recording_blocking(
 }
 
 #[tauri::command]
-fn save_openai_key(app: tauri::AppHandle, key: String) -> Result<(), String> {
+fn save_openai_key(
+    app: tauri::AppHandle,
+    key: String,
+) -> Result<(), String> {
     let bin = engine_binary(&app)?;
+
     let output = Command::new(bin)
         .args(["save-key"])
-        .env("MEET_OPENAI_KEY", key.trim())
+        .env(
+            "MEET_OPENAI_KEY",
+            key.trim(),
+        )
         .output()
-        .map_err(|err| format!("could not save the key: {err}"))?;
+        .map_err(|err| {
+            format!(
+                "could not save the key: {err}"
+            )
+        })?;
+
     if !output.status.success() {
-        let err_text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let err_text =
+            String::from_utf8_lossy(
+                &output.stderr,
+            )
+            .trim()
+            .to_string();
+
         if err_text.is_empty() {
-            return Err("could not save the key".into());
+            return Err(
+                "could not save the key".into(),
+            );
         }
+
         return Err(err_text);
     }
+
     Ok(())
 }
 
@@ -400,9 +714,20 @@ struct KeyStatus {
 }
 
 #[tauri::command]
-fn openai_key_status(app: tauri::AppHandle) -> Result<KeyStatus, String> {
-    let raw = run_engine(&app, &["key-status".into()])?;
-    serde_json::from_str(&raw).map_err(|err| format!("could not read the key status: {err}"))
+fn openai_key_status(
+    app: tauri::AppHandle,
+) -> Result<KeyStatus, String> {
+    let raw = run_engine(
+        &app,
+        &["key-status".into()],
+    )?;
+
+    serde_json::from_str(&raw)
+        .map_err(|err| {
+            format!(
+                "could not read the key status: {err}"
+            )
+        })
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -417,10 +742,13 @@ struct OpenAIResult {
 struct StreamLine {
     #[serde(default)]
     delta: String,
+
     #[serde(default)]
     text: String,
+
     #[serde(default)]
     summary_path: String,
+
     #[serde(default)]
     done: bool,
 }
@@ -431,64 +759,135 @@ struct AnswerDelta {
     text: String,
 }
 
-fn summarize_streaming(app: tauri::AppHandle, path: String, ticket: u32) -> Result<OpenAIResult, String> {
+fn summarize_streaming(
+    app: tauri::AppHandle,
+    path: String,
+    ticket: u32,
+) -> Result<OpenAIResult, String> {
     let bin = engine_binary(&app)?;
+
     let mut child = Command::new(bin)
-        .args(["summarize", "--file", &path, "--stream"])
+        .args([
+            "summarize",
+            "--file",
+            &path,
+            "--stream",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|err| format!("could not start the answer: {err}"))?;
+        .map_err(|err| {
+            format!(
+                "could not start the answer: {err}"
+            )
+        })?;
+
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "answer output was not available".to_string())?;
+        .ok_or_else(|| {
+            "answer output was not available"
+                .to_string()
+        })?;
+
     let mut stderr = child
         .stderr
         .take()
-        .ok_or_else(|| "answer errors were not available".to_string())?;
-    let errors = Arc::new(Mutex::new(String::new()));
-    let errors_for_thread = Arc::clone(&errors);
+        .ok_or_else(|| {
+            "answer errors were not available"
+                .to_string()
+        })?;
+
+    let errors =
+        Arc::new(Mutex::new(String::new()));
+
+    let errors_for_thread =
+        Arc::clone(&errors);
+
     thread::spawn(move || {
         let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
-        *errors_for_thread.lock().expect("stderr") = text;
+
+        let _ =
+            stderr.read_to_string(
+                &mut text,
+            );
+
+        *errors_for_thread
+            .lock()
+            .expect("stderr") = text;
     });
 
-    let mut result: Option<OpenAIResult> = None;
-    for line in BufReader::new(stdout).lines() {
-        let line = line.map_err(|err| format!("could not read the answer: {err}"))?;
-        let Ok(parsed) = serde_json::from_str::<StreamLine>(&line) else {
+    let mut result:
+        Option<OpenAIResult> = None;
+
+    for line in
+        BufReader::new(stdout).lines()
+    {
+        let line = line.map_err(
+            |err| {
+                format!(
+                    "could not read the answer: {err}"
+                )
+            },
+        )?;
+
+        let Ok(parsed) =
+            serde_json::from_str::<StreamLine>(
+                &line,
+            )
+        else {
             continue;
         };
+
         if !parsed.delta.is_empty() {
-            let _ = app.emit(
-                "answer-delta",
-                AnswerDelta {
-                    ticket,
-                    text: parsed.delta,
-                },
-            );
+            let _ =
+                app.emit(
+                    "answer-delta",
+                    AnswerDelta {
+                        ticket,
+                        text: parsed.delta,
+                    },
+                );
         }
+
         if parsed.done {
-            result = Some(OpenAIResult {
-                text: parsed.text,
-                summary_path: parsed.summary_path,
-            });
+            result =
+                Some(OpenAIResult {
+                    text: parsed.text,
+                    summary_path:
+                        parsed.summary_path,
+                });
         }
     }
 
-    let status = child
-        .wait()
-        .map_err(|err| format!("could not finish the answer: {err}"))?;
+    let status =
+        child.wait().map_err(|err| {
+            format!(
+                "could not finish the answer: {err}"
+            )
+        })?;
+
     if !status.success() {
-        let err_text = errors.lock().expect("stderr").trim().to_string();
+        let err_text =
+            errors
+                .lock()
+                .expect("stderr")
+                .trim()
+                .to_string();
+
         if err_text.is_empty() {
-            return Err("OpenAI returned no answer".into());
+            return Err(
+                "OpenAI returned no answer"
+                    .into(),
+            );
         }
+
         return Err(err_text);
     }
-    result.ok_or_else(|| "OpenAI returned no answer".to_string())
+
+    result.ok_or_else(|| {
+        "OpenAI returned no answer".into()
+    })
 }
 
 #[tauri::command]
@@ -497,7 +896,16 @@ async fn summarize_transcript(
     path: String,
     ticket: u32,
 ) -> Result<OpenAIResult, String> {
-    spawn_off_ui(move || summarize_streaming(app, path, ticket)).await
+    spawn_off_ui(
+        move || {
+            summarize_streaming(
+                app,
+                path,
+                ticket,
+            )
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -520,101 +928,223 @@ async fn answer_question(
                 path,
             ],
         )?;
-        serde_json::from_str(&raw).map_err(|err| format!("could not read the answer: {err}"))
+
+        serde_json::from_str(&raw)
+            .map_err(|err| {
+                format!(
+                    "could not read the answer: {err}"
+                )
+            })
     })
     .await
 }
 
 #[tauri::command]
-fn save_transcript(path: String, text: String) -> Result<(), String> {
-    let file = std::path::Path::new(&path);
+fn save_transcript(
+    path: String,
+    text: String,
+) -> Result<(), String> {
+    let file =
+        std::path::Path::new(&path);
+
     let name = file
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
-    if !path.starts_with('/') || !path.contains("/Downloads/") || !name.starts_with("meet-") || !name.ends_with(".txt")
+
+    let is_downloads_path =
+        if cfg!(windows) {
+            path.contains("\\Downloads\\") ||
+            path.contains("/Downloads/")
+        } else {
+            path.contains("/Downloads/")
+        };
+
+    if !is_downloads_path ||
+        !name.starts_with("meet-") ||
+        !name.ends_with(".txt")
     {
-        return Err("transcript path is not in Downloads".into());
+        return Err(
+            "transcript path is not in Downloads"
+                .into(),
+        );
     }
-    fs::write(file, text).map_err(|err| format!("could not save the transcript: {err}"))
+
+    fs::write(file, text).map_err(
+        |err| {
+            format!(
+                "could not save the transcript: {err}"
+            )
+        },
+    )
 }
 
 #[tauri::command]
-async fn stop_recording(app: tauri::AppHandle) -> Result<SavedTake, String> {
-    let state = app.state::<AppState>();
+async fn stop_recording(
+    app: tauri::AppHandle,
+) -> Result<SavedTake, String> {
+    let state =
+        app.state::<AppState>();
+
     let job = state
         .job
         .lock()
         .expect("recording state")
         .take()
-        .ok_or_else(|| "nothing is recording".to_string())?;
-    spawn_off_ui(move || stop_job(job, Duration::from_secs(45))).await
+        .ok_or_else(|| {
+            "nothing is recording".to_string()
+        })?;
+
+    spawn_off_ui(move || {
+        stop_job(
+            job,
+            Duration::from_secs(180),
+        )
+    })
+    .await
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg_attr(
+    mobile,
+    tauri::mobile_entry_point
+)]
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
             job: Mutex::new(None),
         })
-        .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_opener::init(),
+        )
         .setup(|app| {
-            if let Some(window) = app.get_webview_window("main") {
-                capture::exclude_from_capture(&window);
+            if let Some(window) =
+                app.get_webview_window("main")
+            {
+                capture::exclude_from_capture(
+                    &window,
+                );
             }
+
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            list_devices,
-            list_recordings,
-            recording_status,
-            start_recording,
-            stop_recording,
-            save_transcript,
-            save_openai_key,
-            openai_key_status,
-            summarize_transcript,
-            answer_question
-        ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application")
+        .invoke_handler(
+            tauri::generate_handler![
+                list_devices,
+                list_recordings,
+                recording_status,
+                start_recording,
+                stop_recording,
+                save_transcript,
+                save_openai_key,
+                openai_key_status,
+                summarize_transcript,
+                answer_question
+            ],
+        )
+        .build(
+            tauri::generate_context!(),
+        )
+        .expect(
+            "error while building tauri application",
+        )
         .run(|app, event| {
             match event {
                 tauri::RunEvent::WindowEvent {
                     label,
-                    event: tauri::WindowEvent::CloseRequested { api, .. },
+                    event:
+                        tauri::WindowEvent::CloseRequested {
+                            api,
+                            ..
+                        },
                     ..
                 } => {
-                    // Handle window close request
-                    if let Some(state) = app.try_state::<AppState>() {
-                        if let Some(job) = state.job.lock().expect("recording state").take() {
-                            let _ = stop_job(job, Duration::from_millis(1500));
+                    if let Some(state) =
+                        app.try_state::<AppState>()
+                    {
+                        if let Some(job) =
+                            state
+                                .job
+                                .lock()
+                                .expect(
+                                    "recording state",
+                                )
+                                .take()
+                        {
+                            let _ =
+                                stop_job(
+                                    job,
+                                    Duration::from_millis(
+                                        1500,
+                                    ),
+                                );
                         }
                     }
-                    // Allow window to close
+
                     api.prevent_close();
-                    if let Some(window) = app.get_webview_window(&label) {
-                        let _ = window.close();
+
+                    if let Some(window) =
+                        app.get_webview_window(
+                            &label,
+                        )
+                    {
+                        let _ =
+                            window.close();
                     }
                 }
-                tauri::RunEvent::ExitRequested { api, .. } => {
-                    // Handle system quit request
-                    if let Some(state) = app.try_state::<AppState>() {
-                        if let Some(job) = state.job.lock().expect("recording state").take() {
-                            let _ = stop_job(job, Duration::from_millis(1500));
+
+                tauri::RunEvent::ExitRequested {
+                    api,
+                    ..
+                } => {
+                    if let Some(state) =
+                        app.try_state::<AppState>()
+                    {
+                        if let Some(job) =
+                            state
+                                .job
+                                .lock()
+                                .expect(
+                                    "recording state",
+                                )
+                                .take()
+                        {
+                            let _ =
+                                stop_job(
+                                    job,
+                                    Duration::from_millis(
+                                        1500,
+                                    ),
+                                );
                         }
                     }
-                    // Allow app to quit
+
                     api.prevent_exit();
                 }
+
                 tauri::RunEvent::Exit => {
-                    // Final cleanup on exit
-                    if let Some(state) = app.try_state::<AppState>() {
-                        if let Some(job) = state.job.lock().expect("recording state").take() {
-                            let _ = stop_job(job, Duration::from_millis(1500));
+                    if let Some(state) =
+                        app.try_state::<AppState>()
+                    {
+                        if let Some(job) =
+                            state
+                                .job
+                                .lock()
+                                .expect(
+                                    "recording state",
+                                )
+                                .take()
+                        {
+                            let _ =
+                                stop_job(
+                                    job,
+                                    Duration::from_millis(
+                                        1500,
+                                    ),
+                                );
                         }
                     }
                 }
+
                 _ => {}
             }
         });

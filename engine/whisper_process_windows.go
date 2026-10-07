@@ -1,4 +1,4 @@
-//go:build linux
+//go:build windows
 
 package main
 
@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -29,21 +28,41 @@ type whisperClient struct {
 }
 
 func locateWhisper() (string, string, error) {
-	roots := make([]string, 0, 2)
+	roots := make([]string, 0, 4)
 
 	if exe, err := os.Executable(); err == nil {
-		roots = append(roots, filepath.Dir(exe))
+		roots = append(
+			roots,
+			filepath.Dir(exe),
+		)
 	}
 
 	if cwd, err := os.Getwd(); err == nil {
-		roots = append(roots, cwd)
+		roots = append(
+			roots,
+			cwd,
+		)
+	}
+
+	if root := os.Getenv("MEET_CAPTURE_ROOT"); root != "" {
+		roots = append(
+			roots,
+			root,
+		)
+	}
+
+	if root := os.Getenv("MEETREC_ROOT"); root != "" {
+		roots = append(
+			roots,
+			root,
+		)
 	}
 
 	for _, root := range roots {
 		bin := filepath.Join(
 			root,
 			"bin",
-			"whisper-server",
+			"whisper-server.exe",
 		)
 
 		model := filepath.Join(
@@ -64,7 +83,7 @@ func locateWhisper() (string, string, error) {
 	}
 
 	return "", "", errors.New(
-		"Whisper is not installed. Expected engine/bin/whisper-server and engine/models/ggml-small.en.bin",
+		"Whisper is not installed. Expected engine/bin/whisper-server.exe and engine/models/ggml-small.en.bin",
 	)
 }
 
@@ -97,15 +116,6 @@ func startWhisper() (*whisperClient, error) {
 
 		cmd.Stdout = logs
 		cmd.Stderr = logs
-
-		cmd.Env = append(
-			os.Environ(),
-			"LD_LIBRARY_PATH="+filepath.Dir(bin),
-		)
-
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Pdeathsig: syscall.SIGTERM,
-		}
 
 		if err := cmd.Start(); err != nil {
 			return nil, fmt.Errorf(
@@ -140,8 +150,8 @@ func startWhisper() (*whisperClient, error) {
 			lastErr = err
 
 			if strings.Contains(
-				logs.String(),
-				"couldn't bind",
+				strings.ToLower(logs.String()),
+				"bind",
 			) {
 				continue
 			}
@@ -187,12 +197,15 @@ func (c *whisperClient) waitReady() error {
 		)
 
 		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
+			body, _ := io.ReadAll(
+				resp.Body,
+			)
+
 			resp.Body.Close()
 
 			if resp.StatusCode == http.StatusOK &&
 				strings.Contains(
-					string(body),
+					strings.ToLower(string(body)),
 					"ok",
 				) {
 				return nil

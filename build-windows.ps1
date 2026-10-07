@@ -1,63 +1,85 @@
-# build-windows.ps1 - Build Meet Capture for Windows (PowerShell)
+$ErrorActionPreference = "Stop"
 
-Write-Host "🔨 Building Meet Capture for Windows (x86_64)..." -ForegroundColor Green
+Write-Host "========================================="
+Write-Host " Meet Capture - Windows Build"
+Write-Host "========================================="
+
 Write-Host ""
+Write-Host "Checking dependencies..."
 
-# Check if running on Windows
-if ($PSVersionTable.Platform -ne "Win32NT") {
-    Write-Host "⚠️  WARNING: You are not on Windows." -ForegroundColor Yellow
-    Write-Host "   To build Windows on macOS/Linux, use: npm run tauri build -- --target x86_64-pc-windows-msvc" -ForegroundColor Yellow
-    exit 1
-}
+node --version
+npm --version
+go version
+rustc --version
+cargo --version
+ffmpeg -version
 
-# Check WebView2
-Write-Host "🔍 Checking for WebView2 Runtime..."
-if (-not (Test-Path "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")) {
-    Write-Host "⚠️  WebView2 Runtime not found. Installing..." -ForegroundColor Yellow
-    Write-Host "   Download from: https://developer.microsoft.com/en-us/microsoft-edge/webview2/" -ForegroundColor Cyan
-}
+Write-Host ""
+Write-Host "Installing npm dependencies..."
 
-# Install dependencies
-Write-Host "📦 Installing Node dependencies..." -ForegroundColor Cyan
 npm install
 
-# Build frontend and backend
-Write-Host "🏗️  Building frontend and backend..." -ForegroundColor Cyan
-npm run build:all
+Write-Host ""
+Write-Host "Building Windows Go engine..."
 
-# Build Tauri app for Windows
-Write-Host "📦 Building Tauri application..." -ForegroundColor Cyan
-npm run tauri build -- --target x86_64-pc-windows-msvc
+npm run engine:windows
 
-# Create output directory
-New-Item -ItemType Directory -Path "Downloads\windows" -Force | Out-Null
-
-# Copy artifacts
-Write-Host "📁 Copying artifacts to Downloads\windows..." -ForegroundColor Cyan
-
-# Copy MSI installer
-$msiPath = "src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi"
-if (Test-Path $msiPath) {
-    Get-ChildItem "$msiPath\*.msi" | ForEach-Object {
-        Copy-Item $_.FullName "Downloads\windows\"
-    }
-}
-
-# Copy executable
-$exePath = "src-tauri\target\x86_64-pc-windows-msvc\release\tauri-app.exe"
-if (Test-Path $exePath) {
-    Copy-Item $exePath "Downloads\windows\"
+if (-not (Test-Path "engine\meetrec.exe")) {
+    throw "engine\meetrec.exe was not created"
 }
 
 Write-Host ""
-Write-Host "✅ Build complete!" -ForegroundColor Green
-Write-Host "📦 Artifacts saved to: Downloads\windows\" -ForegroundColor Green
-Write-Host ""
-Write-Host "📋 Files created:" -ForegroundColor Cyan
-Get-ChildItem "Downloads\windows\" | Select-Object Name, Length
+Write-Host "Checking Whisper..."
+
+if (-not (Test-Path "engine\bin\whisper-server.exe")) {
+    Write-Warning "engine\bin\whisper-server.exe was not found."
+    Write-Warning "Whisper must be installed before recording can work."
+}
+
+if (-not (Test-Path "engine\models\ggml-small.en.bin")) {
+    throw "engine\models\ggml-small.en.bin was not found"
+}
 
 Write-Host ""
-Write-Host "Next steps:" -ForegroundColor Yellow
-Write-Host "  1. Test the installer or executable" -ForegroundColor Yellow
-Write-Host "  2. Sign the MSI for production (requires code signing certificate)" -ForegroundColor Yellow
-Write-Host "  3. Distribute to users" -ForegroundColor Yellow
+Write-Host "Testing Windows engine..."
+
+Push-Location engine
+
+try {
+    .\meetrec.exe devices
+}
+finally {
+    Pop-Location
+}
+
+Write-Host ""
+Write-Host "Building frontend..."
+
+npm run build
+
+Write-Host ""
+Write-Host "Building Tauri Windows application..."
+
+npm run tauri build `
+    -- `
+    --target x86_64-pc-windows-msvc `
+    --config src-tauri/tauri.windows.conf.json
+
+Write-Host ""
+Write-Host "========================================="
+Write-Host " Build completed"
+Write-Host "========================================="
+
+$bundlePath = "src-tauri\target\x86_64-pc-windows-msvc\release\bundle"
+
+if (Test-Path "$bundlePath\msi") {
+    Write-Host ""
+    Write-Host "MSI:"
+    Get-ChildItem "$bundlePath\msi"
+}
+
+if (Test-Path "$bundlePath\nsis") {
+    Write-Host ""
+    Write-Host "NSIS:"
+    Get-ChildItem "$bundlePath\nsis"
+}

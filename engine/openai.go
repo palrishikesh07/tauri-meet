@@ -212,10 +212,21 @@ func clipRunes(text string, max int) string {
 }
 
 func allowedTranscript(path string) error {
-	name := filepath.Base(path)
-	if !filepath.IsAbs(path) || !strings.Contains(path, "/Downloads/") || !strings.HasPrefix(name, "meet-") || !strings.HasSuffix(name, ".txt") || strings.HasSuffix(name, ".summary.txt") {
+	// Normalize Windows paths to forward slashes before checking the
+	// Downloads directory. The Linux implementation used "/Downloads/",
+	// but Windows paths normally contain "\\Downloads\\".
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+	normalizedPath := filepath.ToSlash(cleanPath)
+	name := filepath.Base(cleanPath)
+
+	if !filepath.IsAbs(cleanPath) ||
+		!strings.Contains(normalizedPath, "/Downloads/") ||
+		!strings.HasPrefix(name, "meet-") ||
+		!strings.HasSuffix(name, ".txt") ||
+		strings.HasSuffix(name, ".summary.txt") {
 		return errors.New("choose a saved meeting transcript")
 	}
+
 	return nil
 }
 
