@@ -13,22 +13,30 @@
     "windows": [
       {
         "label": "main",
-        "title": "Meet Capture",
-        "width": 480,
-        "height": 840,
+        "title": "AI I",
+        "width": 850,
+        "height": 600,
+        "minWidth": 500,
+        "minHeight": 300,
+        "decorations": true,
+        "transparent": true,
+        "alwaysOnTop": false,
+        "contentProtected": true,
         "resizable": true,
-        "center": true,
-        "contentProtected": true
+        "maximizable": true,
+        "minimizable": true,
+        "closable": true,
+        "shadow": true,
+        "skipTaskbar": false
       }
-    ],
-    "security": {
-      "csp": null
-    }
+    ]
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": ["../engine/meetrec"],
+    "resources": [
+      "../engine/meetrec"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

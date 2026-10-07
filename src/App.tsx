@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+
 import {
   listDevices,
   recordingStatus,
@@ -41,6 +44,7 @@ function messageOf(err: unknown): string {
   return "Something went wrong";
 }
 
+
 function App() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [source, setSource] = useState("");
@@ -57,6 +61,24 @@ function App() {
   const recordingRef = useRef(false);
   const stoppingRef = useRef(false);
   const summaryTask = useRef<Promise<unknown> | null>(null);
+
+  const appWindow = getCurrentWindow();
+
+  useEffect(() => {
+    const enableContentProtection = async () => {
+      try {
+        await appWindow.setContentProtected(true);
+        console.log("Screen capture protection enabled");
+      } catch (error) {
+        console.error("Failed to enable content protection:", error);
+      }
+    };
+
+    enableContentProtection();
+  }, []);
+
+
+
 
   useEffect(() => {
     let cancelled = false;
@@ -160,7 +182,7 @@ function App() {
       recordingRef.current = false;
       await getCurrentWindow().destroy();
     });
-    
+
     // Keyboard shortcuts for closing
     const handleKeyDown = (e: KeyboardEvent) => {
       // Ctrl+Q (Windows/Linux) or Cmd+Q (macOS)
@@ -170,9 +192,9 @@ function App() {
       }
       // Alt+F4 is handled by the OS/Tauri
     };
-    
+
     window.addEventListener("keydown", handleKeyDown);
-    
+
     return () => {
       void unlistenClose.then((stop) => stop());
       window.removeEventListener("keydown", handleKeyDown);
@@ -230,6 +252,9 @@ function App() {
     }
   }
 
+
+
+
   const selected = devices.find((device) => device.id === source);
   const outputLabel =
     devices.length === 0
@@ -240,30 +265,30 @@ function App() {
 
   return (
     <main className="app">
-      <div style={{ position: "absolute", top: 10, right: 10 }}>
-        <button
-          type="button"
-          onClick={closeApp}
-          style={{
-            background: "#ef4444",
-            color: "white",
-            border: "none",
-            padding: "8px 12px",
-            borderRadius: "4px",
-            cursor: "pointer",
-            fontSize: "12px",
-            fontWeight: "500",
-          }}
-          title="Close application"
-        >
-          ✕ Quit
-        </button>
-      </div>
       <section className="panel">
         <h2>Answer</h2>
         <div className="transcript answers">
           {answer ? (
-            <p>{answer}</p>
+            <div className="answer-content">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  code({ className, children, ...props }) {
+                    const match = /language-(\w+)/.exec(className || "");
+
+                    return (
+                      <pre className="code-block">
+                        <code className={match ? `language-${match[1]}` : ""} {...props}>
+                          {String(children).replace(/\n$/, "")}
+                        </code>
+                      </pre>
+                    );
+                  },
+                }}
+              >
+                {answer}
+              </ReactMarkdown>
+            </div>
           ) : (
             <p className="hint">
               {answering
