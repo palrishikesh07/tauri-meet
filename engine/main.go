@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"time"
 )
 
 func main() {
@@ -105,6 +108,89 @@ func main() {
 				nil,
 			)
 		})
+	case "local-summarize":
+		fs := flag.NewFlagSet(
+			"local-summarize",
+			flag.ContinueOnError,
+		)
+
+		fs.SetOutput(os.Stderr)
+
+		file := fs.String(
+			"file",
+			"",
+			"path to a meet-*.txt transcript",
+		)
+
+		topic := fs.String(
+			"topic",
+			"",
+			"interview topic or technology",
+		)
+
+		stream := fs.Bool(
+			"stream",
+			false,
+			"print the answer as it arrives",
+		)
+
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			os.Exit(2)
+		}
+
+		if *stream {
+
+			out := json.NewEncoder(
+				os.Stdout,
+			)
+
+			result, err :=
+				localSummarizeTranscript(
+					*file,
+					*topic,
+					func(delta string) {
+						_ = out.Encode(
+							map[string]string{
+								"delta": delta,
+							},
+						)
+					},
+				)
+
+			if err != nil {
+				fmt.Fprintln(
+					os.Stderr,
+					err,
+				)
+
+				os.Exit(1)
+			}
+
+			_ = out.Encode(
+				map[string]any{
+					"done":        true,
+					"text":        result.Text,
+					"summaryPath": result.SummaryPath,
+				},
+			)
+
+			return
+		}
+
+		writeJSON(
+			func() (any, error) {
+				return localSummarizeTranscript(
+					*file,
+					*topic,
+					nil,
+				)
+			},
+		)
+	case "local-warmup":
+		if err := warmupOllama(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	case "record":
 		fs := flag.NewFlagSet("record", flag.ContinueOnError)
 		fs.SetOutput(os.Stderr)
@@ -122,6 +208,60 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+}
+
+func warmupOllama() error {
+	if err := checkOllama(); err != nil {
+		return err
+	}
+
+	requestBody := ollamaRequest{
+		Model:     ollamaModel,
+		Stream:    false,
+		KeepAlive: "5m",
+		Messages: []ollamaMessage{
+			{
+				Role:    "user",
+				Content: "Ready.",
+			},
+		},
+		Options: ollamaOptions{
+			NumCtx:     1024,
+			NumPredict: 1,
+		},
+	}
+
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(
+		http.MethodPost,
+		ollamaURL,
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{
+		Timeout: 60 * time.Second,
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("could not warm up Ollama: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("Ollama warmup returned HTTP %d", resp.StatusCode)
+	}
+
+	return nil
 }
 
 func writeJSON(load func() (any, error)) {
@@ -145,5 +285,8 @@ func usage() {
   meetrec list
   meetrec record [--source MONITOR_ID]
   meetrec answer --text QUESTION [--context TRANSCRIPT] [--file TRANSCRIPT.txt]
-  meetrec summarize --file TRANSCRIPT.txt [--topic TECHNOLOGY]`)
+  meetrec summarize --file TRANSCRIPT.txt [--topic TECHNOLOGY] [--stream]
+  meetrec local-summarize --file TRANSCRIPT.txt [--topic TECHNOLOGY] [--stream]
+  meetrec local-warmup`)
+
 }

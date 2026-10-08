@@ -1,28 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type Device = {
+export interface Device {
   id: string;
   label: string;
   detail: string;
   isDefault: boolean;
-};
+}
 
-export type DeviceList = {
+export interface DeviceList {
   downloadsDir: string;
   defaultSource: string;
   devices: Device[];
-};
+}
 
-export type RecordingFile = {
-  name: string;
-  path: string;
-  bytes: number;
-  modified: string;
-  textPath?: string;
-  summaryPath?: string;
-};
-
-export type RecordingStatus = {
+export interface RecordingStatus {
   recording: boolean;
   path: string | null;
   textPath: string | null;
@@ -30,43 +21,66 @@ export type RecordingStatus = {
   elapsedSecs: number;
   transcript: string;
   partial: string;
-};
+}
 
-export type SavedTake = {
+export interface ReadyMessage {
+  status: string;
+  path: string;
+  source: string;
+  textPath: string;
+}
+
+export interface SavedTake {
   path: string;
   bytes: number;
   textPath: string;
   transcript: string;
-};
+}
 
-export const listDevices = () => invoke<DeviceList>("list_devices");
+export interface OpenAIResult {
+  text: string;
+  summaryPath: string;
+}
 
-export const listRecordings = () => invoke<RecordingFile[]>("list_recordings");
+export async function listDevices(): Promise<DeviceList> {
+  return invoke<DeviceList>("list_devices");
+}
 
-export const recordingStatus = () => invoke<RecordingStatus>("recording_status");
+export async function recordingStatus(): Promise<RecordingStatus> {
+  return invoke<RecordingStatus>("recording_status");
+}
 
-export const startRecording = (source: string) =>
-  invoke<{ status: string; path: string; source: string; textPath: string }>(
-    "start_recording",
-    { source },
-  );
+export async function startRecording(source?: string): Promise<ReadyMessage> {
+  return invoke<ReadyMessage>("start_recording", { source: source || null });
+}
 
-export const saveTranscript = (path: string, text: string) =>
-  invoke<void>("save_transcript", { path, text });
+export async function stopRecording(): Promise<SavedTake> {
+  return invoke<SavedTake>("stop_recording");
+}
 
-export const stopRecording = () => invoke<SavedTake>("stop_recording");
-
-export const openaiKeyStatus = () => invoke<{ saved: boolean }>("openai_key_status");
-
-export const saveOpenAIKey = (key: string) =>
-  invoke<void>("save_openai_key", { key });
-
-export const summarizeTranscript = (path: string, ticket: number) =>
-  invoke<{ text: string; summaryPath: string }>("summarize_transcript", { path, ticket });
-
-export const answerQuestion = (question: string, context: string, path: string) =>
-  invoke<{ text: string; summaryPath: string }>("answer_question", {
-    question,
-    context,
+export async function summarizeTranscript(
+  path: string,
+  ticket: number,
+  topic = "",
+): Promise<OpenAIResult> {
+  return invoke<OpenAIResult>("summarize_transcript", {
     path,
+    ticket,
+    topic,
   });
+}
+
+export async function summarizeTranscriptLocal(
+  path: string,
+  ticket: number,
+  topic = "",
+): Promise<OpenAIResult> {
+  return invoke<OpenAIResult>(
+    "summarize_transcript_local",
+    {
+      path,
+      ticket,
+      topic,
+    },
+  );
+}

@@ -13,14 +13,14 @@
     "windows": [
       {
         "label": "main",
-        "title": "AI I",
+        "title": "",
         "width": 850,
         "height": 600,
         "minWidth": 500,
         "minHeight": 300,
         "decorations": true,
         "transparent": true,
-        "alwaysOnTop": false,
+        "alwaysOnTop": true,
         "contentProtected": true,
         "resizable": true,
         "maximizable": true,

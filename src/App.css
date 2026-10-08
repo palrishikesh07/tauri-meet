@@ -2,7 +2,6 @@
   font-family: Ubuntu, Cantarell, "Segoe UI", sans-serif;
   font-size: 16px;
   color: #f4f0e6;
-  background: #141612;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -21,9 +20,14 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background:
-    radial-gradient(1200px 420px at 10% -10%, rgba(255, 215, 0, 0.12), transparent 55%),
-    #141612;
+  background:radial-gradient(1200px 420px at 10% -10%, rgba(255, 215, 0, 0.12), transparent 55%), #2f2f2fb0
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
 }
 
 button,
@@ -34,7 +38,6 @@ select {
 .app {
   width: min(440px, calc(100% - 32px));
   margin: 0 auto;
-  padding: 28px 0 32px;
 }
 
 h2 {
@@ -51,11 +54,9 @@ h2 {
 }
 
 .panel {
-  margin-top: 22px;
-  padding: 16px;
-  background: #1d201b;
-  border: 1px solid #31352c;
-  border-radius: 16px;
+  padding: 4px;
+  /* background: #1d201b; */
+  /* border: 1px solid #31352c; */
 }
 
 label {
@@ -85,21 +86,6 @@ input {
   align-items: center;
   gap: 16px;
   margin-top: 18px;
-}
-
-.record {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 132px;
-  padding: 12px 16px;
-  color: #1a120c;
-  background: var(--yellow-primary);
-  border: 0;
-  border-radius: 999px;
-  cursor: pointer;
-  font-weight: 600;
-  transition: all 0.2s ease;
 }
 
 .record:hover:not(:disabled) {
@@ -288,6 +274,171 @@ input {
 
 .picker-menu li:not(:last-child) .picker-option {
   border-bottom: 1px solid var(--border-color);
+}
+
+
+.record {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+
+  min-width: 110px;
+  height: 38px;
+  padding: 0 16px;
+
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 20px;
+
+  background: rgba(255, 255, 255, 0.15);
+  color: white;
+
+  font-size: 14px;
+  font-weight: 600;
+
+  cursor: pointer;
+  pointer-events: auto;
+
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+
+  transition:
+    background 0.2s ease,
+    transform 0.15s ease;
+}
+
+.record:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.22);
+  transform: translateY(-1px);
+}
+
+.record:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.record.stop {
+  background: rgba(255, 60, 60, 0.25);
+  border-color: rgba(255, 80, 80, 0.45);
+}
+
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #ff3b30;
+  flex-shrink: 0;
+}
+
+.record.stop .dot {
+  animation: recordPulse 1s infinite;
+}
+
+.record-control {
+  position: fixed;
+  top: 48px;
+  right: 20px;
+  z-index: 10000;
+
+  /* The container itself must allow clicks. */
+  pointer-events: auto;
+
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.cancel-answer {
+  position: relative;
+  z-index: 10001;
+
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  min-width: 130px;
+  height: 34px;
+  padding: 0 14px;
+
+  border-radius: 18px;
+  border: 1px solid rgba(255, 100, 100, 0.45);
+
+  background: rgba(255, 70, 70, 0.16);
+  color: #fff;
+
+  font-size: 13px;
+  font-weight: 600;
+
+  cursor: pointer;
+
+  pointer-events: auto;
+
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+
+  transition:
+    background 0.2s ease,
+    opacity 0.2s ease,
+    transform 0.15s ease;
+}
+
+.cancel-answer:hover:not(:disabled) {
+  background: rgba(255, 70, 70, 0.28);
+  transform: translateY(-1px);
+}
+
+.cancel-answer:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.cancel-answer:disabled {
+  opacity: 0.65;
+  cursor: wait;
+  pointer-events: auto;
+}
+
+.answer-section {
+  overflow-y: auto;
+  max-height: calc(100vh - 100px);
+}
+
+#ai-provider {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  outline: none;
+}
+
+#ai-provider:focus {
+  border-color: rgba(120, 180, 255, 0.65);
+}
+
+#ai-provider option {
+  background: #222;
+  color: #fff;
+}
+
+
+@keyframes recordPulse {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.4;
+    transform: scale(0.75);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 @keyframes pulse {

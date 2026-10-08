@@ -27,6 +27,7 @@ struct Job {
 
 struct AppState {
     job: Mutex<Option<Job>>,
+    ai_pid: Mutex<Option<u32>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -212,6 +213,117 @@ fn interrupt(child: &mut Child) {
         // Fallback for an unexpected recorder process without piped stdin.
         let _ = child.kill();
     }
+}
+
+fn clear_ai_pid(state: &AppState, pid: u32) {
+    let mut guard = state.ai_pid.lock().expect("AI process state");
+    if *guard == Some(pid) {
+        *guard = None;
+    }
+}
+
+struct AiProcessGuard<'a> {
+    state: &'a AppState,
+    pid: u32,
+}
+
+impl Drop for AiProcessGuard<'_> {
+    fn drop(&mut self) {
+        clear_ai_pid(self.state, self.pid);
+    }
+}
+
+fn set_ai_pid(state: &AppState, pid: u32) {
+    *state.ai_pid.lock().expect("AI process state") = Some(pid);
+}
+
+#[tauri::command]
+fn cancel_ai_request(
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+
+    // Take the PID before killing the process. This also prevents a second
+    // cancel request from accidentally targeting a newer AI request.
+    let pid = state
+        .ai_pid
+        .lock()
+        .expect("AI process state")
+        .take();
+
+    let Some(pid) = pid else {
+        // The AI process may have finished between the button click and
+        // this command. That is already a successful cancellation state.
+        return Ok(());
+    };
+
+    if pid == 0 {
+        return Ok(());
+    }
+
+    #[cfg(windows)]
+    {
+        // The AI request runs inside meetrec.exe. /T is important because
+        // meetrec.exe can have child processes, and /F makes cancellation
+        // immediate rather than waiting for Ollama generation to finish.
+        let taskkill = std::env::var_os("WINDIR")
+            .map(|root| {
+                std::path::PathBuf::from(root)
+                    .join("System32")
+                    .join("taskkill.exe")
+            })
+            .filter(|path| path.is_file())
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from("taskkill.exe")
+            });
+
+        let status = Command::new(&taskkill)
+            .args([
+                "/PID",
+                &pid.to_string(),
+                "/T",
+                "/F",
+            ])
+            .status()
+            .map_err(|err| {
+                format!(
+                    "could not start taskkill for AI process {pid}: {err}"
+                )
+            })?;
+
+        if !status.success() {
+            // The process may have completed just before taskkill ran.
+            // Verify whether the PID still exists before reporting an error.
+            let check = Command::new(&taskkill)
+                .args([
+                    "/FI",
+                    &format!("PID eq {pid}"),
+                    "/NH",
+                ])
+                .output();
+
+            let still_running = check
+                .ok()
+                .map(|output| {
+                    String::from_utf8_lossy(&output.stdout)
+                        .contains(&pid.to_string())
+                })
+                .unwrap_or(false);
+
+            if still_running {
+                return Err(format!(
+                    "could not stop AI process (PID {pid})"
+                ));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+
+    Ok(())
 }
 
 fn stop_job(
@@ -763,6 +875,7 @@ fn summarize_streaming(
     app: tauri::AppHandle,
     path: String,
     ticket: u32,
+    topic: String,
 ) -> Result<OpenAIResult, String> {
     let bin = engine_binary(&app)?;
 
@@ -771,6 +884,8 @@ fn summarize_streaming(
             "summarize",
             "--file",
             &path,
+            "--topic",
+            &topic,
             "--stream",
         ])
         .stdout(Stdio::piped())
@@ -781,6 +896,14 @@ fn summarize_streaming(
                 "could not start the answer: {err}"
             )
         })?;
+
+    let state = app.state::<AppState>();
+    let ai_pid = child.id();
+    set_ai_pid(&state, ai_pid);
+    let _ai_guard = AiProcessGuard {
+        state: &state,
+        pid: ai_pid,
+    };
 
     let stdout = child
         .stdout
@@ -890,11 +1013,150 @@ fn summarize_streaming(
     })
 }
 
+fn summarize_local_streaming(
+    app: tauri::AppHandle,
+    path: String,
+    ticket: u32,
+    topic: String,
+) -> Result<OpenAIResult, String> {
+    let bin = engine_binary(&app)?;
+
+    let mut child = Command::new(bin)
+        .args([
+            "local-summarize",
+            "--file",
+            &path,
+            "--topic",
+            &topic,
+            "--stream",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            format!(
+                "could not start local AI: {err}"
+            )
+        })?;
+
+    let state = app.state::<AppState>();
+    let ai_pid = child.id();
+    set_ai_pid(&state, ai_pid);
+    let _ai_guard = AiProcessGuard {
+        state: &state,
+        pid: ai_pid,
+    };
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| {
+            "local AI output was not available"
+                .to_string()
+        })?;
+
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| {
+            "local AI errors were not available"
+                .to_string()
+        })?;
+
+    let errors =
+        Arc::new(Mutex::new(String::new()));
+
+    let errors_for_thread =
+        Arc::clone(&errors);
+
+    thread::spawn(move || {
+        let mut text = String::new();
+
+        let _ =
+            stderr.read_to_string(&mut text);
+
+        *errors_for_thread
+            .lock()
+            .expect("stderr") = text;
+    });
+
+    let mut result:
+        Option<OpenAIResult> = None;
+
+    for line in
+        BufReader::new(stdout).lines()
+    {
+        let line = line.map_err(|err| {
+            format!(
+                "could not read local AI answer: {err}"
+            )
+        })?;
+
+        let Ok(parsed) =
+            serde_json::from_str::<StreamLine>(
+                &line,
+            )
+        else {
+            continue;
+        };
+
+        if !parsed.delta.is_empty() {
+            let _ =
+                app.emit(
+                    "answer-delta",
+                    AnswerDelta {
+                        ticket,
+                        text: parsed.delta,
+                    },
+                );
+        }
+
+        if parsed.done {
+            result =
+                Some(OpenAIResult {
+                    text: parsed.text,
+                    summary_path:
+                        parsed.summary_path,
+                });
+        }
+    }
+
+    let status =
+        child.wait().map_err(|err| {
+            format!(
+                "could not finish local AI: {err}"
+            )
+        })?;
+
+    if !status.success() {
+        let err_text =
+            errors
+                .lock()
+                .expect("stderr")
+                .trim()
+                .to_string();
+
+        if err_text.is_empty() {
+            return Err(
+                "local AI returned no answer"
+                    .into(),
+            );
+        }
+
+        return Err(err_text);
+    }
+
+    result.ok_or_else(|| {
+        "local AI returned no answer".into()
+    })
+}
+
 #[tauri::command]
 async fn summarize_transcript(
     app: tauri::AppHandle,
     path: String,
     ticket: u32,
+    topic: String,
 ) -> Result<OpenAIResult, String> {
     spawn_off_ui(
         move || {
@@ -902,9 +1164,28 @@ async fn summarize_transcript(
                 app,
                 path,
                 ticket,
+                topic,
             )
         },
     )
+    .await
+}
+
+#[tauri::command]
+async fn summarize_transcript_local(
+    app: tauri::AppHandle,
+    path: String,
+    ticket: u32,
+    topic: String,
+) -> Result<OpenAIResult, String> {
+    spawn_off_ui(move || {
+        summarize_local_streaming(
+            app,
+            path,
+            ticket,
+            topic,
+        )
+    })
     .await
 }
 
@@ -1012,6 +1293,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
             job: Mutex::new(None),
+            ai_pid: Mutex::new(None),
         })
         .plugin(
             tauri_plugin_opener::init(),
@@ -1038,6 +1320,8 @@ pub fn run() {
                 save_openai_key,
                 openai_key_status,
                 summarize_transcript,
+                summarize_transcript_local,
+                cancel_ai_request,
                 answer_question
             ],
         )
@@ -1047,102 +1331,21 @@ pub fn run() {
         .expect(
             "error while building tauri application",
         )
-        .run(|app, event| {
+        .run(|_app, event| {
             match event {
                 tauri::RunEvent::WindowEvent {
-                    label,
-                    event:
-                        tauri::WindowEvent::CloseRequested {
-                            api,
-                            ..
-                        },
+                    event: tauri::WindowEvent::CloseRequested { .. },
                     ..
                 } => {
-                    if let Some(state) =
-                        app.try_state::<AppState>()
-                    {
-                        if let Some(job) =
-                            state
-                                .job
-                                .lock()
-                                .expect(
-                                    "recording state",
-                                )
-                                .take()
-                        {
-                            let _ =
-                                stop_job(
-                                    job,
-                                    Duration::from_millis(
-                                        1500,
-                                    ),
-                                );
-                        }
-                    }
-
-                    api.prevent_close();
-
-                    if let Some(window) =
-                        app.get_webview_window(
-                            &label,
-                        )
-                    {
-                        let _ =
-                            window.close();
-                    }
+                    println!("Tauri: Window close requested");
                 }
 
-                tauri::RunEvent::ExitRequested {
-                    api,
-                    ..
-                } => {
-                    if let Some(state) =
-                        app.try_state::<AppState>()
-                    {
-                        if let Some(job) =
-                            state
-                                .job
-                                .lock()
-                                .expect(
-                                    "recording state",
-                                )
-                                .take()
-                        {
-                            let _ =
-                                stop_job(
-                                    job,
-                                    Duration::from_millis(
-                                        1500,
-                                    ),
-                                );
-                        }
-                    }
-
-                    api.prevent_exit();
+                tauri::RunEvent::ExitRequested { .. } => {
+                    println!("Tauri: Application exit requested");
                 }
 
                 tauri::RunEvent::Exit => {
-                    if let Some(state) =
-                        app.try_state::<AppState>()
-                    {
-                        if let Some(job) =
-                            state
-                                .job
-                                .lock()
-                                .expect(
-                                    "recording state",
-                                )
-                                .take()
-                        {
-                            let _ =
-                                stop_job(
-                                    job,
-                                    Duration::from_millis(
-                                        1500,
-                                    ),
-                                );
-                        }
-                    }
+                    println!("Tauri: Application exited");
                 }
 
                 _ => {}

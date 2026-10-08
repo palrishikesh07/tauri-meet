@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
 
 import {
   listDevices,
@@ -10,43 +11,29 @@ import {
   startRecording,
   stopRecording,
   summarizeTranscript,
-  type Device,
+  summarizeTranscriptLocal,
 } from "./api";
+
 import "./App.css";
 
-// Window control functions
-async function closeApp() {
-  const active = getCurrentWindow();
-  // Stop any recording if active
-  try {
-    await stopRecording().catch(() => null);
-  } catch (err) {
-    console.error("Error stopping recording:", err);
-  }
-  // Close the window
-  await active.close();
-}
-
-// Utility Functions
-function hasQuestion(text: string): boolean {
+function hasQuestion(text) {
   return /\?|\b(how|what|why|when|where|who|which)\b|question/i.test(text);
 }
 
-function formatClock(totalSeconds: number): string {
+function formatClock(totalSeconds) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
-function messageOf(err: unknown): string {
+function messageOf(err) {
   if (typeof err === "string") return err;
   if (err instanceof Error) return err.message;
   return "Something went wrong";
 }
 
-
 function App() {
-  const [devices, setDevices] = useState<Device[]>([]);
+  const [devices, setDevices] = useState([]);
   const [source, setSource] = useState("");
   const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -58,75 +45,94 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [answer, setAnswer] = useState("");
   const [answering, setAnswering] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+
+  const [aiProvider, setAiProvider] = useState("openai");
+
+  // Interview topic / technology used to focus the OpenAI answer.
+  const [topic, setTopic] = useState("");
+
   const recordingRef = useRef(false);
   const stoppingRef = useRef(false);
-  const summaryTask = useRef<Promise<unknown> | null>(null);
+  const summaryTask = useRef(null);
+  const summaryGen = useRef(0);
 
   const appWindow = getCurrentWindow();
 
+  // Keep this Tauri window visible locally but protected from supported
+  // screen-capture APIs such as Windows WDA_EXCLUDEFROMCAPTURE.
   useEffect(() => {
     const enableContentProtection = async () => {
       try {
         await appWindow.setContentProtected(true);
         console.log("Screen capture protection enabled");
-      } catch (error) {
-        console.error("Failed to enable content protection:", error);
+      } catch (err) {
+        console.error("Failed to enable content protection:", err);
       }
     };
 
-    enableContentProtection();
-  }, []);
+    void enableContentProtection();
+  }, [appWindow]);
 
-
-
-
+  // Load playback devices and current recording state.
   useEffect(() => {
     let cancelled = false;
+
     (async () => {
       try {
         const [listed, status] = await Promise.all([
           listDevices(),
           recordingStatus(),
         ]);
+
         if (cancelled) return;
-        setDevices(listed.devices);
-        setSource(listed.defaultSource);
+
+        setDevices(listed.devices || []);
+        setSource(listed.defaultSource || "");
         setRecording(status.recording);
-        setElapsed(status.elapsedSecs);
+        setElapsed(status.elapsedSecs || 0);
         setActivePath(status.path ?? "");
         setTextPath(status.textPath ?? "");
-        setTranscript(status.transcript);
-        setPartial(status.partial);
+        setTranscript(status.transcript || "");
+        setPartial(status.partial || "");
       } catch (err) {
         if (!cancelled) setError(messageOf(err));
       }
     })();
+
     return () => {
       cancelled = true;
     };
   }, []);
 
+  // Poll recording state while recording.
   useEffect(() => {
-    if (!recording) return;
+    if (!recording) return undefined;
+
     const timer = window.setInterval(async () => {
       if (stoppingRef.current) return;
+
       try {
         const status = await recordingStatus();
+
         if (stoppingRef.current) return;
+
         if (!status.recording) {
           setRecording(false);
           return;
         }
+
         setRecording(true);
-        setElapsed(status.elapsedSecs);
+        setElapsed(status.elapsedSecs || 0);
         setActivePath(status.path ?? "");
         setTextPath(status.textPath ?? "");
-        setTranscript(status.transcript);
-        setPartial(status.partial);
+        setTranscript(status.transcript || "");
+        setPartial(status.partial || "");
       } catch (err) {
         setError(messageOf(err));
       }
     }, 500);
+
     return () => window.clearInterval(timer);
   }, [recording]);
 
@@ -134,128 +140,213 @@ function App() {
     recordingRef.current = recording;
   }, [recording]);
 
-  const summaryGen = useRef(0);
+  // Ask OpenAI about the latest transcript, optionally focused on the
+  // selected interview topic / technology.
+  function requestSummary(
+    path,
+    force = false,
+  ) {
+    if (!path) {
+      return Promise.resolve();
+    }
 
-  function requestSummary(path: string, force = false) {
-    if (!path) return Promise.resolve();
-    if (!force && summaryTask.current) return summaryTask.current;
-    const gen = ++summaryGen.current;
+    if (
+      !force &&
+      summaryTask.current
+    ) {
+      return summaryTask.current;
+    }
+
+    const gen =
+      ++summaryGen.current;
+
     setAnswering(true);
     setError("");
     setAnswer("");
-    const task = summarizeTranscript(path, gen)
+
+    const request =
+      aiProvider === "local"
+        ? summarizeTranscriptLocal(
+          path,
+          gen,
+          topic,
+        )
+        : summarizeTranscript(
+          path,
+          gen,
+          topic,
+        );
+
+    const task = request
       .then((result) => {
-        if (gen !== summaryGen.current) return;
+        if (
+          gen !==
+          summaryGen.current
+        ) {
+          return;
+        }
+
         setAnswer(result.text);
       })
       .catch((err) => {
-        if (gen !== summaryGen.current) return;
+        if (
+          gen !==
+          summaryGen.current
+        ) {
+          return;
+        }
+
         summaryTask.current = null;
-        setError(messageOf(err));
+
+        setError(
+          messageOf(err),
+        );
       })
       .finally(() => {
-        if (gen === summaryGen.current) setAnswering(false);
+        if (
+          gen ===
+          summaryGen.current
+        ) {
+          setAnswering(false);
+        }
       });
+
     summaryTask.current = task;
+
     return task;
   }
 
+  // Stream answer deltas from the Rust/OpenAI pipeline.
   useEffect(() => {
-    const unlisten = listen<{ ticket: number; text: string }>("answer-delta", (event) => {
+    let mounted = true;
+
+    const unlisten = listen("answer-delta", (event) => {
+      if (!mounted) return;
       if (event.payload.ticket !== summaryGen.current) return;
+
       setAnswer((current) => current + event.payload.text);
     });
+
     return () => {
+      mounted = false;
       void unlisten.then((stop) => stop());
     };
   }, []);
 
+  // If a question becomes visible during recording, start an answer.
   useEffect(() => {
-    if (!recording || !textPath || summaryTask.current || !hasQuestion(transcript)) return;
+    if (!recording || !textPath || summaryTask.current || !hasQuestion(transcript)) {
+      return;
+    }
+
     void requestSummary(textPath);
-  }, [recording, textPath, transcript]);
+  }, [recording, textPath, transcript, topic]);
 
-  useEffect(() => {
-    const unlistenClose = getCurrentWindow().onCloseRequested(async (event) => {
-      if (!recordingRef.current) return;
-      event.preventDefault();
-      recordingRef.current = false;
-      await getCurrentWindow().destroy();
-    });
+  async function cancelAnswer() {
+    if (cancelling) return;
 
-    // Keyboard shortcuts for closing
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Ctrl+Q (Windows/Linux) or Cmd+Q (macOS)
-      if ((e.ctrlKey || e.metaKey) && e.key === "q") {
-        e.preventDefault();
-        void closeApp();
-      }
-      // Alt+F4 is handled by the OS/Tauri
-    };
+    // Immediately invalidate the current AI generation.
+    ++summaryGen.current;
 
-    window.addEventListener("keydown", handleKeyDown);
+    // Forget the current promise so a new request can start.
+    summaryTask.current = null;
 
-    return () => {
-      void unlistenClose.then((stop) => stop());
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, []);
+    // Immediately update UI.
+    setCancelling(true);
+    setAnswer("");
+    setAnswering(false);
+    setError("");
 
+    try {
+      await invoke("cancel_ai_request");
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setCancelling(false);
+      setBusy(false);
+    }
+  }
   async function toggle() {
     setBusy(true);
     setError("");
+
     try {
       if (recording) {
         recordingRef.current = false;
         stoppingRef.current = true;
-        setAnswering(true);
+
         const saved = await stopRecording();
+
         setRecording(false);
         setElapsed(0);
         setPartial("");
         setActivePath(saved.path);
         setTextPath(saved.textPath);
-        const spoken = saved.transcript.trim();
-        if (spoken) setTranscript(spoken);
+
+        const spoken = (saved.transcript || "").trim();
+
+        if (spoken) {
+          setTranscript(spoken);
+        }
+
         if (!saved.textPath || !spoken) {
-          setError("The transcript was empty, so there was nothing to answer.");
-        } else if (summaryTask.current) {
-          await summaryTask.current;
+          setError(
+            "The transcript was empty, so there was nothing to answer."
+          );
         } else {
-          await requestSummary(saved.textPath);
+          // IMPORTANT:
+          // Start AI generation but DO NOT await it here.
+          // This allows Cancel / Reset to remain clickable.
+          void requestSummary(saved.textPath);
         }
       } else {
         const started = await startRecording(source);
+
         recordingRef.current = true;
         summaryTask.current = null;
+
         setAnswer("");
         setRecording(true);
         setElapsed(0);
         setTranscript("");
         setPartial("");
-        setTextPath(started.textPath);
-        setActivePath(started.path);
+        setTextPath(started.textPath || "");
+        setActivePath(started.path || "");
       }
     } catch (err) {
       recordingRef.current = false;
       setError(messageOf(err));
+
       const status = await recordingStatus().catch(() => null);
+
       if (status) {
         setRecording(status.recording);
-        setElapsed(status.elapsedSecs);
+        setElapsed(status.elapsedSecs || 0);
         setActivePath(status.path ?? "");
+        setTextPath(status.textPath ?? "");
       }
     } finally {
       stoppingRef.current = false;
-      setAnswering(false);
+
+      // IMPORTANT:
+      // busy belongs only to Record/Stop operation.
+      // It must not stay true while AI is generating.
       setBusy(false);
     }
   }
 
+  const handleRecordWheel = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
 
+    const answerSection = document.querySelector(".answers");
+    if (!answerSection) return;
 
+    answerSection.scrollTop += event.deltaY;
+  };
 
   const selected = devices.find((device) => device.id === source);
+
   const outputLabel =
     devices.length === 0
       ? "No playback devices found"
@@ -266,7 +357,6 @@ function App() {
   return (
     <main className="app">
       <section className="panel">
-        <h2>Answer</h2>
         <div className="transcript answers">
           {answer ? (
             <div className="answer-content">
@@ -278,7 +368,10 @@ function App() {
 
                     return (
                       <pre className="code-block">
-                        <code className={match ? `language-${match[1]}` : ""} {...props}>
+                        <code
+                          className={match ? `language-${match[1]}` : ""}
+                          {...props}
+                        >
                           {String(children).replace(/\n$/, "")}
                         </code>
                       </pre>
@@ -300,7 +393,60 @@ function App() {
       </section>
 
       <section className="panel">
+        <label htmlFor="ai-provider">
+          AI Provider
+        </label>
+
+        <select
+          id="ai-provider"
+          value={aiProvider}
+          onChange={(event) =>
+            setAiProvider(
+              event.target.value,
+            )
+          }
+          disabled={
+            recording || busy
+          }
+        >
+          <option value="openai">
+            OpenAI — Cloud
+          </option>
+
+          <option value="local">
+            Qwen3 4B — Local
+          </option>
+        </select>
+
+        <p className="hint">
+          {aiProvider === "local"
+            ? "Runs locally through Ollama. Internet is not required for answer generation."
+            : "Uses your existing OpenAI configuration."}
+        </p>
+      </section>
+
+      <section className="panel topic-panel">
+        <label htmlFor="interview-topic">Interview Topic / Technology</label>
+
+        <input
+          id="interview-topic"
+          type="text"
+          value={topic}
+          onChange={(event) => setTopic(event.target.value)}
+          placeholder="e.g. Node.js, React, AWS, MongoDB"
+          disabled={recording || busy}
+          autoComplete="off"
+        />
+
+        <p className="hint">
+          Optional. This topic is sent with the transcript so the answer stays
+          focused on the selected technology.
+        </p>
+      </section>
+
+      <section className="panel">
         <label id="output-label">Playback output</label>
+
         <OutputPicker
           label={outputLabel}
           devices={devices}
@@ -308,6 +454,7 @@ function App() {
           disabled={recording || devices.length === 0}
           onChange={setSource}
         />
+
         <p className="hint">
           {selected
             ? "This is the speaker or headset the meeting is playing through. Pick the one you are listening on."
@@ -315,16 +462,34 @@ function App() {
         </p>
 
         <div className="record-row">
-          <button
-            type="button"
-            className={recording ? "record stop" : "record"}
-            onClick={toggle}
-            disabled={busy || (!recording && devices.length === 0)}
-            aria-pressed={recording}
-          >
-            <span className="dot" />
-            {recording ? "Stop" : "Record"}
-          </button>
+          <div className="record-control" onWheel={handleRecordWheel}>
+            <button
+              type="button"
+              className={recording ? "record stop" : "record"}
+              onClick={toggle}
+              disabled={busy || (!recording && devices.length === 0)}
+              aria-pressed={recording}
+            >
+              <span className="dot" />
+              {recording ? "Stop" : "Record"}
+            </button>
+
+            {answering ? (
+              <button
+                type="button"
+                className="cancel-answer"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  void cancelAnswer();
+                }}
+                disabled={cancelling}
+              >
+                {cancelling ? "Cancelling…" : "⛔ Cancel / Reset"}
+              </button>
+            ) : null}
+          </div>
+
           <div>
             <p className="clock">{formatClock(elapsed)}</p>
             <p className="hint">
@@ -334,12 +499,14 @@ function App() {
             </p>
           </div>
         </div>
+
         {activePath ? <p className="path">{activePath}</p> : null}
         {error ? <p className="error">{error}</p> : null}
       </section>
 
       <section className="panel">
         <h2>Transcript</h2>
+
         <div className="transcript">
           {transcript || partial ? (
             <>
@@ -354,22 +521,11 @@ function App() {
             </p>
           )}
         </div>
-      </section>
 
-      <p className="fine">
-        Record only conversations you are allowed to record. Files stay on this
-        computer.
-      </p>
+        {textPath ? <p className="path">{textPath}</p> : null}
+      </section>
     </main>
   );
-}
-
-interface OutputPickerProps {
-  label: string;
-  devices: Device[];
-  source: string;
-  disabled: boolean;
-  onChange: (id: string) => void;
 }
 
 function OutputPicker({
@@ -378,20 +534,28 @@ function OutputPicker({
   source,
   disabled,
   onChange,
-}: OutputPickerProps) {
+}) {
   const [open, setOpen] = useState(false);
-  const root = useRef<HTMLDivElement>(null);
+  const root = useRef(null);
 
   useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    if (!open) return undefined;
+
+    const close = (event) => {
+      if (!root.current?.contains(event.target)) {
+        setOpen(false);
+      }
     };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+
+    const onKey = (event) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
     };
+
     document.addEventListener("mousedown", close);
     document.addEventListener("keydown", onKey);
+
     return () => {
       document.removeEventListener("mousedown", close);
       document.removeEventListener("keydown", onKey);
@@ -412,11 +576,17 @@ function OutputPicker({
         <span>{label}</span>
         <span className="picker-chevron" aria-hidden="true" />
       </button>
+
       {open ? (
-        <ul className="picker-menu" role="listbox" aria-labelledby="output-label">
+        <ul
+          className="picker-menu"
+          role="listbox"
+          aria-labelledby="output-label"
+        >
           {devices.map((device) => {
             const text = `${device.label}${device.isDefault ? " (current)" : ""}`;
             const active = device.id === source;
+
             return (
               <li key={device.id} role="presentation">
                 <button
