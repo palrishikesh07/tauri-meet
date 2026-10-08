@@ -298,6 +298,8 @@ func record(source string) error {
 		"voip",
 		"-vbr",
 		"on",
+		"-draw_mouse",
+		"0",
 		output,
 	)
 

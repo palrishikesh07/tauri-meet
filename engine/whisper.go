@@ -122,7 +122,7 @@ func startWhisper() (*whisperClient, error) {
 		}()
 
 		client := &whisperClient{
-			cmd:  cmd,
+			cmd: cmd,
 			base: fmt.Sprintf(
 				"http://127.0.0.1:%d",
 				port,

@@ -46,29 +46,64 @@ func main() {
 	case "summarize":
 		fs := flag.NewFlagSet("summarize", flag.ContinueOnError)
 		fs.SetOutput(os.Stderr)
-		file := fs.String("file", "", "path to a meet-*.txt transcript")
-		stream := fs.Bool("stream", false, "print the answer as it arrives")
+
+		file := fs.String(
+			"file",
+			"",
+			"path to a meet-*.txt transcript",
+		)
+
+		topic := fs.String(
+			"topic",
+			"",
+			"interview topic or technology",
+		)
+
+		stream := fs.Bool(
+			"stream",
+			false,
+			"print the answer as it arrives",
+		)
+
 		if err := fs.Parse(os.Args[2:]); err != nil {
 			os.Exit(2)
 		}
+
 		if *stream {
 			out := json.NewEncoder(os.Stdout)
-			result, err := summarizeTranscript(*file, func(delta string) {
-				_ = out.Encode(map[string]string{"delta": delta})
-			})
+
+			result, err := summarizeTranscript(
+				*file,
+				*topic,
+				func(delta string) {
+					_ = out.Encode(
+						map[string]string{
+							"delta": delta,
+						},
+					)
+				},
+			)
+
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
+
 			_ = out.Encode(map[string]any{
 				"done":        true,
 				"text":        result.Text,
 				"summaryPath": result.SummaryPath,
 			})
+
 			return
 		}
+
 		writeJSON(func() (any, error) {
-			return summarizeTranscript(*file, nil)
+			return summarizeTranscript(
+				*file,
+				*topic,
+				nil,
+			)
 		})
 	case "record":
 		fs := flag.NewFlagSet("record", flag.ContinueOnError)
@@ -110,5 +145,5 @@ func usage() {
   meetrec list
   meetrec record [--source MONITOR_ID]
   meetrec answer --text QUESTION [--context TRANSCRIPT] [--file TRANSCRIPT.txt]
-  meetrec summarize --file TRANSCRIPT.txt`)
+  meetrec summarize --file TRANSCRIPT.txt [--topic TECHNOLOGY]`)
 }

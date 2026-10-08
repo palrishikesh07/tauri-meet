@@ -171,7 +171,7 @@ func answerQuestion(question, context, transcriptPath string) (openAIResult, err
 	return openAIResult{Text: answer, SummaryPath: summaryPath}, nil
 }
 
-func summarizeTranscript(path string, emit func(string)) (openAIResult, error) {
+func summarizeTranscript(path, topic string, emit func(string)) (openAIResult, error) {
 	resolvedPath, err := resolveTranscriptPath(path)
 	if err != nil {
 		return openAIResult{}, err
@@ -192,7 +192,7 @@ func summarizeTranscript(path string, emit func(string)) (openAIResult, error) {
 	if err != nil {
 		return openAIResult{}, err
 	}
-	answer, err := askOpenAI(key, transcript, emit)
+	answer, err := askOpenAI(key, transcript, topic, emit)
 	if err != nil {
 		return openAIResult{}, err
 	}
@@ -311,11 +311,18 @@ func askOpenAIOne(key, question, context string) (string, error) {
 	return completeOpenAI(key, "Answer this one question from a meeting or lesson. Use the transcript when it contains the answer. If it does not, answer the question yourself in clear language. Reply in plain text with the answer only.", user, nil)
 }
 
-func askOpenAI(key, transcript string, emit func(string)) (string, error) {
+func askOpenAI(key, transcript, topic string, emit func(string)) (string, error) {
+	user := "Latest meeting transcript:\n\n" + transcript
+
+	topic = strings.TrimSpace(topic)
+	if topic != "" {
+		user = "Interview Topic / Technology:\n" + topic + "\n\n" + user
+	}
+
 	return completeOpenAI(
 		key,
 		meetingAnswerSystemPrompt,
-		"Latest meeting transcript:\n\n"+transcript,
+		user,
 		emit,
 	)
 }
