@@ -84,3 +84,14 @@ export async function summarizeTranscriptLocal(
     },
   );
 }
+
+
+export async function saveTranscript(
+  path: string,
+  text: string,
+): Promise<void> {
+  return invoke<void>("save_transcript", {
+    path,
+    text,
+  });
+}

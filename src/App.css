@@ -77,8 +77,8 @@ input {
 }
 
 .hint {
-  margin: 8px 0 0;
-  font-size: 0.85rem;
+    margin: 4px 0 0;
+    font-size: 0.65rem;
 }
 
 .record-row {
@@ -421,6 +421,68 @@ input {
 #ai-provider option {
   background: #222;
   color: #fff;
+}
+
+
+/* Add these styles to App.css */
+.transcript-editor {
+  width: 100%;
+  min-height: 120px;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.045);
+  color: inherit;
+  font: inherit;
+  line-height: 1.55;
+  outline: none;
+}
+
+.transcript-editor:focus {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.transcript-editor::placeholder {
+  opacity: 0.55;
+}
+
+.transcript-partial {
+  margin-top: 8px;
+}
+
+.transcript-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.ask-transcript {
+  min-width: 90px;
+  height: 36px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 18px;
+  background: rgba(80, 150, 255, 0.22);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: unset;
+  pointer-events: auto;
+  position: relative;
+  z-index: 20;
+}
+
+.ask-transcript:hover:not(:disabled) {
+  background: rgba(80, 150, 255, 0.34);
+}
+
+.ask-transcript:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 

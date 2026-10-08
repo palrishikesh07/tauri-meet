@@ -12,6 +12,7 @@ import {
   stopRecording,
   summarizeTranscript,
   summarizeTranscriptLocal,
+  saveTranscript,
 } from "./api";
 
 import "./App.css";
@@ -35,6 +36,7 @@ function messageOf(err) {
 function App() {
   const [devices, setDevices] = useState([]);
   const [source, setSource] = useState("");
+  const [downloadsDir, setDownloadsDir] = useState("");
   const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [activePath, setActivePath] = useState("");
@@ -88,6 +90,7 @@ function App() {
         if (cancelled) return;
 
         setDevices(listed.devices || []);
+        setDownloadsDir(listed.downloadsDir || "");
         setSource(listed.defaultSource || "");
         setRecording(status.recording);
         setElapsed(status.elapsedSecs || 0);
@@ -245,13 +248,11 @@ function App() {
   async function cancelAnswer() {
     if (cancelling) return;
 
-    // Immediately invalidate the current AI generation.
+    // Invalidate the current UI request first so no late stream chunk
+    // from the old request can appear in the next answer.
     ++summaryGen.current;
-
-    // Forget the current promise so a new request can start.
     summaryTask.current = null;
 
-    // Immediately update UI.
     setCancelling(true);
     setAnswer("");
     setAnswering(false);
@@ -266,6 +267,7 @@ function App() {
       setBusy(false);
     }
   }
+
   async function toggle() {
     setBusy(true);
     setError("");
@@ -274,6 +276,7 @@ function App() {
       if (recording) {
         recordingRef.current = false;
         stoppingRef.current = true;
+        setAnswering(true);
 
         const saved = await stopRecording();
 
@@ -290,14 +293,11 @@ function App() {
         }
 
         if (!saved.textPath || !spoken) {
-          setError(
-            "The transcript was empty, so there was nothing to answer."
-          );
+          setError("The transcript was empty, so there was nothing to answer.");
+        } else if (summaryTask.current) {
+          await summaryTask.current;
         } else {
-          // IMPORTANT:
-          // Start AI generation but DO NOT await it here.
-          // This allows Cancel / Reset to remain clickable.
-          void requestSummary(saved.textPath);
+          await requestSummary(saved.textPath);
         }
       } else {
         const started = await startRecording(source);
@@ -327,10 +327,7 @@ function App() {
       }
     } finally {
       stoppingRef.current = false;
-
-      // IMPORTANT:
-      // busy belongs only to Record/Stop operation.
-      // It must not stay true while AI is generating.
+      setAnswering(false);
       setBusy(false);
     }
   }
@@ -392,6 +389,89 @@ function App() {
         </div>
       </section>
 
+
+      <section className="panel">
+        <h2>Transcript</h2>
+
+        <textarea
+          className="transcript-editor"
+          value={transcript}
+          onChange={(event) => setTranscript(event.target.value)}
+          placeholder={
+            recording
+              ? "Listening for speech…"
+              : "Transcript appears here. You can edit it or type your own question, for example: Explain loops in Node.js"
+          }
+          spellCheck={false}
+          aria-label="Transcript or custom question"
+        />
+
+        {partial ? (
+          <p className="partial transcript-partial">{partial}</p>
+        ) : null}
+
+        <div className="transcript-actions">
+          <button
+            type="button"
+            className="ask-transcript"
+            onClick={async () => {
+              const text = transcript.trim();
+
+              if (!text) {
+                setError("Type a question in the Transcript box first.");
+                return;
+              }
+
+              try {
+                setBusy(true);
+                setError("");
+
+                // A manually typed question does not need a previous recording.
+                // Create a fresh transcript file in Downloads so both OpenAI
+                // and local Qwen use exactly the text entered in the textarea.
+                const manualPath =
+                  textPath ||
+                  `${downloadsDir}/meet-manual-question-${Date.now()}.txt`;
+
+                await saveTranscript(manualPath, text);
+                setTextPath(manualPath);
+                await requestSummary(manualPath, true);
+              } catch (err) {
+                setError(messageOf(err));
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            {answering ? "Answering…" : "Ask AI"}
+          </button>
+
+          <span className="hint">
+            Edit the transcript or type your own question, then click Ask AI.
+          </span>
+        </div>
+
+        {textPath ? <p className="path">{textPath}</p> : null}
+      </section>
+      <section className="panel topic-panel">
+        <label htmlFor="interview-topic">Interview Topic / Technology</label>
+
+        <input
+          id="interview-topic"
+          type="text"
+          value={topic}
+          onChange={(event) => setTopic(event.target.value)}
+          placeholder="e.g. Node.js, React, AWS, MongoDB"
+          disabled={recording || busy}
+          autoComplete="off"
+        />
+
+        <p className="hint">
+          Optional. This topic is sent with the transcript so the answer stays
+          focused on the selected technology.
+        </p>
+      </section>
+
       <section className="panel">
         <label htmlFor="ai-provider">
           AI Provider
@@ -424,26 +504,6 @@ function App() {
             : "Uses your existing OpenAI configuration."}
         </p>
       </section>
-
-      <section className="panel topic-panel">
-        <label htmlFor="interview-topic">Interview Topic / Technology</label>
-
-        <input
-          id="interview-topic"
-          type="text"
-          value={topic}
-          onChange={(event) => setTopic(event.target.value)}
-          placeholder="e.g. Node.js, React, AWS, MongoDB"
-          disabled={recording || busy}
-          autoComplete="off"
-        />
-
-        <p className="hint">
-          Optional. This topic is sent with the transcript so the answer stays
-          focused on the selected technology.
-        </p>
-      </section>
-
       <section className="panel">
         <label id="output-label">Playback output</label>
 
@@ -478,12 +538,24 @@ function App() {
               <button
                 type="button"
                 className="cancel-answer"
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  void cancelAnswer();
-                }}
+                onClick={() => void cancelAnswer()}
                 disabled={cancelling}
+                style={{
+                  marginTop: "8px",
+                  minWidth: "110px",
+                  height: "34px",
+                  padding: "0 14px",
+                  borderRadius: "18px",
+                  border: "1px solid rgba(255, 100, 100, 0.45)",
+                  background: cancelling
+                    ? "rgba(255, 70, 70, 0.08)"
+                    : "rgba(255, 70, 70, 0.16)",
+                  color: "#fff",
+                  cursor: cancelling ? "wait" : "pointer",
+                  opacity: cancelling ? 0.65 : 1,
+                  fontSize: "13px",
+                  fontWeight: 600,
+                }}
               >
                 {cancelling ? "Cancelling…" : "⛔ Cancel / Reset"}
               </button>
@@ -504,26 +576,7 @@ function App() {
         {error ? <p className="error">{error}</p> : null}
       </section>
 
-      <section className="panel">
-        <h2>Transcript</h2>
 
-        <div className="transcript">
-          {transcript || partial ? (
-            <>
-              {transcript ? <p>{transcript}</p> : null}
-              {partial ? <p className="partial">{partial}</p> : null}
-            </>
-          ) : (
-            <p className="hint">
-              {recording
-                ? "Listening for speech…"
-                : "Lines appear here a few seconds after someone speaks, and the same text is saved next to the audio."}
-            </p>
-          )}
-        </div>
-
-        {textPath ? <p className="path">{textPath}</p> : null}
-      </section>
     </main>
   );
 }

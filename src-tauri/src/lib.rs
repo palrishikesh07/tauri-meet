@@ -1225,39 +1225,37 @@ fn save_transcript(
     path: String,
     text: String,
 ) -> Result<(), String> {
-    let file =
-        std::path::Path::new(&path);
+    let path = path.trim().trim_matches('"');
+
+    let file = std::path::Path::new(path);
 
     let name = file
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
 
-    let is_downloads_path =
-        if cfg!(windows) {
-            path.contains("\\Downloads\\") ||
-            path.contains("/Downloads/")
-        } else {
-            path.contains("/Downloads/")
-        };
+    // Windows paths can use either '\' or '/' and the casing of
+    // "Downloads" should not matter.
+    let normalized = path
+        .replace('\\', "/")
+        .to_ascii_lowercase();
 
-    if !is_downloads_path ||
-        !name.starts_with("meet-") ||
-        !name.ends_with(".txt")
-    {
-        return Err(
-            "transcript path is not in Downloads"
-                .into(),
-        );
+    let is_downloads_path =
+        normalized.contains("/downloads/");
+
+    let valid_filename =
+        name.to_ascii_lowercase().starts_with("meet-") &&
+        name.to_ascii_lowercase().ends_with(".txt");
+
+    if !is_downloads_path || !valid_filename {
+        return Err(format!(
+            "invalid transcript path: {path}"
+        ));
     }
 
-    fs::write(file, text).map_err(
-        |err| {
-            format!(
-                "could not save the transcript: {err}"
-            )
-        },
-    )
+    fs::write(file, text).map_err(|err| {
+        format!("could not save the transcript: {err}")
+    })
 }
 
 #[tauri::command]
